@@ -8,6 +8,7 @@ A closer look at what the [README](../README.md) summarizes.
 - [Checking for mail](#checking-for-mail)
 - [Advanced account settings](#advanced-account-settings)
 - [Special folders](#special-folders)
+- [Sender addresses](#sender-addresses)
 - [Automatic Cc and Bcc](#automatic-cc-and-bcc)
 - [New-mail notifications](#new-mail-notifications)
 - [Profiles and account colors](#profiles-and-account-colors)
@@ -262,6 +263,17 @@ under the names of what they hold. A chosen folder renamed in Flectar Mail keeps
 its place, one deleted gives it back to the server's folder, and with
 **Subscribed folders only** a chosen folder is listed though you haven't
 subscribed to it. Flectar Mail Sync takes the choices to your other devices.
+
+## Sender addresses
+
+An account can send from more addresses than the one it signs in with. Gmail's
+send-as addresses and a JMAP server's identities come from the provider, and for
+other servers you add the aliases they let you send from in the account's
+**Signatures** tab in Settings → Accounts, which also chooses the one new
+messages start from. An account keeps up to 1,000. Past ten, the composer's
+**From** and **Default sender identity** open a picker that finds an address by
+its name or address as you type, and Settings lists 50 at a time with a search
+for the others.
 
 ## Automatic Cc and Bcc
 
@@ -962,12 +974,12 @@ there is no account to create: a 24-word recovery code brings sync back on a
 new device. Your mail, contacts and calendars keep syncing with your mail
 provider as before.
 
-Turn it on in Settings → Sync. **Add a device** on a device that already syncs
-shows a QR code to scan with your phone, or a short code to type on the other
-device, and a device can also join with your recovery code. Each device keeps
-its own mail checking, how much mail history it downloads, its proxy and server
-timeout, and settings that belong to the device itself, such as reduced motion
-and text size.
+Turn it on in Settings → Sync. To add a device, choose **Add a device** on one
+that already syncs and type the code it shows into **Enter code** on the new
+one, either on the welcome screen or in Settings → Sync. A device can also join
+with your recovery code. Each device keeps its own mail checking, how much mail
+history it downloads, its proxy and server timeout, and settings that belong to
+the device itself, such as reduced motion and text size.
 
 Flectar Mail Sync is a paid service, with a free trial, that pays for the
 servers it runs on. Each contribution to Flectar Mail earns a free year of it,
