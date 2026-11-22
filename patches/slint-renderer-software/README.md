@@ -11,7 +11,7 @@ and threads. The reader tests in `src/reader_validation.rs` caught it.
 ## Sources and adaptation
 
 `crates/i-slint-renderer-software` is the published 1.19.0 archive, revision
-`e436f546f71481d786cbc2a74316b1be1ef678c1`, plus one patch, which is ours.
+`e436f546f71481d786cbc2a74316b1be1ef678c1`, plus two patches, which are ours.
 `0001-clip-far-out-of-view.patch` cuts a rounded clip's rect to the current clip,
 grown by its largest corner radius and border, before the conversion. Outside
 that band its corners can't touch anything drawn, so what is in view doesn't
@@ -19,6 +19,11 @@ change, and a clip with nothing in view leaves an empty rect, which hides its
 children as before. The rectangle check of the `TargetPixelBuffer` hooks now
 cuts the rectangle to the clip before the conversion too, as the texture check
 next to it already did. Upstream master has the same code.
+
+`0002-hint-glyph-outlines.patch` turns on hinting in the vector font scaler.
+Unhinted outlines at small sizes land on fractional pixels, so round letters
+sit visibly lower than their neighbours and text looks wavy. Hinting snaps
+baseline, x-height and stems to whole pixels.
 
 `Cargo.toml.orig` is kept unchanged for provenance. The standalone lockfile is
 omitted, and the application lockfiles resolve the patched crate.
@@ -30,7 +35,7 @@ python3 scripts/verify-slint-renderer-software.py
 ```
 
 The verifier downloads the checksum-pinned archive, checks its revision,
-applies the patch, and compares every file with the vendored crate. It also
+applies the patches, and compares every file with the vendored crate. It also
 checks that the root, Android and OpenHarmony workspaces patch the crate and
 that their lockfiles resolve it locally for Slint 1.19.0.
 
