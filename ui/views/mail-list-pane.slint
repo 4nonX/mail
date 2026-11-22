@@ -1690,7 +1690,9 @@ export component MailListPane inherits FocusScope {
 
                                             row-check := SelectionCheckBox {
                                                 // Keep the control in the keyboard focus order even before hover.
-                                                opacity: mail-data.checked || root.selection-mode || (!root.compact && (row-hit.has-hover || self.focus-visible)) ? 1 : 0;
+                                                // Over an avatar it appears only while the pointer is on the
+                                                // avatar itself, so hovering the rest of the row stays calm.
+                                                opacity: mail-data.checked || root.selection-mode || (!root.compact && ((root.show-avatars ? self.has-hover : row-hit.has-hover) || self.focus-visible)) ? 1 : 0;
                                                 enabled: !root.compact || root.selection-mode || mail-data.checked;
                                                 x: root.show-avatars ? 14px : 0px;
                                                 y: root.show-avatars ? (root.dense ? 8px : 12px) : (parent.height - self.height) / 2;

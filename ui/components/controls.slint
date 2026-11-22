@@ -150,6 +150,9 @@ export component SelectionCheckBox inherits FocusVisibleScope {
     in property <bool> checked: false;
     in property <bool> indeterminate: false;
     in property <bool> avatar-overlay: false;
+    // The pointer is over the control's hit target, which callers use to
+    // reveal it only where it sits rather than anywhere on its row.
+    out property <bool> has-hover: hit.has-hover;
     callback toggled(bool);
 
     width: 32px;
@@ -212,7 +215,7 @@ export component SelectionCheckBox inherits FocusVisibleScope {
         }
     }
 
-    TouchArea {
+    hit := TouchArea {
         x: (parent.width - max(parent.width, 44px)) / 2;
         y: (parent.height - max(parent.height, 44px)) / 2;
         width: max(parent.width, 44px);
