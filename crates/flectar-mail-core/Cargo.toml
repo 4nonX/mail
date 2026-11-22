@@ -79,6 +79,11 @@ flectar-mail-sync-crypto = { git = "https://github.com/flectar/mail-sync-client"
 # Names this device in the list of synced devices.
 hostname = "0.4"
 
+# Proton Mail accounts: Proton's own SRP sign-in and OpenPGP key handling,
+# on its pure-Rust OpenPGP backend so no Go toolchain is needed. MIT licensed.
+proton-crypto = { version = "0.14.1", default-features = false, features = ["rustpgp"] }
+proton-crypto-account = { version = "0.20.1", default-features = false, features = ["rustpgp"] }
+
 # misc
 ammonia = "4.1.9"
 # The version ammonia parses with, so no second copy is built.

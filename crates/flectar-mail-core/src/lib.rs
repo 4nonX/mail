@@ -39,6 +39,7 @@ pub mod net;
 mod network;
 pub mod oauth;
 pub mod pop3;
+pub mod proton;
 pub mod queue;
 mod read_receipts;
 pub mod route;

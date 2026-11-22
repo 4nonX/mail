@@ -1,0 +1,35 @@
+[package]
+name = "proton-rpgp"
+version = "0.9.0"
+edition.workspace = true
+
+license-file = "LICENSE"
+description = "Pure Rust OpenPGP wrapper on top of rpgp; used as an optional backend in proton-crypto"
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+pgp = { version = "0.21.0", default-features = false, features = ["pqc", "malformed-artifact-compat", "draft-wussler-openpgp-forwarding", "large-rsa"] }
+thiserror = { workspace = true }
+rsa = "0.9.10"
+rand = { workspace = true }
+sha2 = { workspace = true , features = ["oid"] }
+hex = { workspace = true }
+zeroize = { workspace = true }
+smallvec = "1.10.0"
+kem = "=0.3.0-pre.0" # pinned to avoid automatic update in downstream project. 
+web-time = { workspace = true }
+nom = "8.0"
+# For forwarding
+x25519-dalek = { version = "2.0.1", default-features = false }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+pgp = { version = "0.21.0", default-features = false, features = ["pqc", "malformed-artifact-compat", "draft-wussler-openpgp-forwarding", "large-rsa", "wasm"] }
+
+[features]
+default = []
+# Enables hazardous key generation options intended for testing only (e.g., custom RSA key sizes).
+hazmat-key-gen = []
+
+[lints]
+workspace = true
