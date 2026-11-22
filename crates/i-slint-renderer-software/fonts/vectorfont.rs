@@ -263,6 +263,10 @@ impl VectorFont {
                 let mut scaler = ctx
                     .builder(font_ref)
                     .size(self.pixel_size.get() as f32)
+                    // Hinted outlines put baseline, x-height and stems on whole
+                    // pixels, so small text sits on one line instead of round
+                    // letters blurring below their neighbours.
+                    .hint(true)
                     .normalized_coords(&self.normalized_coords)
                     .build();
                 // Faux italic, for fonts fontique picked as the closest match to an `italic`
