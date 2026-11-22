@@ -1385,6 +1385,13 @@ pub(super) fn refresh_rows_only(
             state.borrow().local_mail.map(|local| local.account_id) == Some(email.account_id)
         }));
     apply_label_rows(app, &labels, selected_email.as_ref());
+    // The reader's star and read state follow the open row, so an action on
+    // it shows once the refreshed row has it, without rendering the message
+    // again. They used to wait for the next selection.
+    if let Some(email) = selected_email.as_ref() {
+        app.set_selected_starred(email.starred);
+        app.set_selected_unread(email.unread);
+    }
     refresh_sidebar(state);
     let selected_domain = selected_email.as_ref().map(|email| {
         let state = state.borrow();

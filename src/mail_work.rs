@@ -411,6 +411,10 @@ pub(super) fn register(
             }
             match result.error {
                 Some(error) => {
+                    // Undo what the reader showed ahead of the action.
+                    if same_view {
+                        refresh_rows_only(&app, &action_state, &action_runtime);
+                    }
                     app.set_render_status(UiMessage::detail("Message action failed: {}", error))
                 }
                 // What became of it is told once the other account has it.

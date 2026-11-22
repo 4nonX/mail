@@ -294,7 +294,7 @@ pub(super) fn prefixed_subject(subject: &str, prefix: &str) -> String {
 }
 
 pub(super) fn perform_selected_action(
-    _app: &AppWindow,
+    app: &AppWindow,
     state: &Rc<RefCell<InboxState>>,
     _runtime: &tokio::runtime::Handle,
     action: &str,
@@ -324,7 +324,17 @@ pub(super) fn perform_selected_action(
             target,
             mail_work::Operation::Action(action.to_owned()),
         )],
-    )
+    )?;
+    // Show the new state at once; the refresh after the action confirms it,
+    // and a failed action puts the row's state back.
+    match action {
+        "star" => app.set_selected_starred(true),
+        "unstar" => app.set_selected_starred(false),
+        "mark_read" => app.set_selected_unread(false),
+        "mark_unread" => app.set_selected_unread(true),
+        _ => {}
+    }
+    Ok(())
 }
 
 pub(super) fn format_file_size(size: u64) -> String {
