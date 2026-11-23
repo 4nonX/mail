@@ -212,6 +212,21 @@ export component OnboardingView inherits Rectangle {
                     button-border: root.ui-border;
                     clicked => { root.open-new-mail-account(); }
                 }
+                ProviderButton {
+                    text: @tr("Connect Proton Mail");
+                    icon: @image-url("../icons/lucide/outline/shield.svg");
+                    colorize-icon: true;
+                    enabled: !root.account-setup-in-progress && !root.oauth-in-progress && !root.oauth-settings-saving;
+                    foreground: root.body-text;
+                    muted: root.muted-text;
+                    surface: root.surface;
+                    hover-surface: root.hover-surface;
+                    button-border: root.ui-border;
+                    clicked => {
+                        root.open-new-mail-account();
+                        root.account-protocol = "proton";
+                    }
+                }
                 if !root.google-available : Text {
                     text: @tr("For Gmail with an app password, use Connect another provider.");
                     color: root.muted-text;
