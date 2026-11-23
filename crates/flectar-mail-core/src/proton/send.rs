@@ -659,13 +659,15 @@ pub(crate) async fn send(
     if draft.recipients.is_empty() {
         return Err(CoreError::Other("the message has no recipients".into()));
     }
+    let addresses = draft
+        .recipients
+        .iter()
+        .map(|email| email.trim().to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut routes = BTreeMap::new();
-    for email in &draft.recipients {
-        let email = email.trim().to_ascii_lowercase();
-        if !routes.contains_key(&email) {
-            let route = route(&c.session, &email).await?;
-            routes.insert(email, route);
-        }
+    for email in addresses {
+        let route = route(&c.session, &email).await?;
+        routes.insert(email, route);
     }
     let packages = packages(c.keys.as_ref(), &draft, &routes)?;
     let sent = c
