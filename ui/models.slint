@@ -297,7 +297,13 @@ export struct CalendarConnectionRow {
 export struct AccountRow {
     id: int,
     drag_key: string,
+    // What lists of accounts call it: `custom_name`, else `default_name`.
     name: string,
+    // The name the user gave the account, or empty.
+    custom_name: string,
+    // What it's called without a name of its own: its owner's name from
+    // the provider, else its address.
+    default_name: string,
     email: string,
     provider: string,
     mail_protocol: string,
@@ -351,6 +357,9 @@ export struct AccountRow {
     // IMAP, POP3 and JMAP: how long to wait for the account's servers, in
     // seconds, as "30", "60", "120" or "300".
     server_timeout: string,
+    // IMAP: what downloads ahead of time, "headers", "messages" or
+    // "everything" (#253).
+    download: string,
     // Days a POP3 server keeps downloaded mail on its own; -1 when it
     // keeps it or hasn't said.
     server_keeps_mail_days: int,

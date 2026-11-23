@@ -39,6 +39,7 @@ pub mod net;
 mod network;
 pub mod oauth;
 pub mod pop3;
+mod prefetch;
 pub mod queue;
 mod read_receipts;
 pub mod route;
@@ -420,6 +421,7 @@ fn password_account_config(args: &AddPasswordAccountArgs, id: i64) -> AccountCon
         id,
         email: args.email.clone(),
         display_name: None,
+        name: None,
         avatar_url: None,
         provider: Provider::Generic,
         auth_kind: AuthKind::Password,
@@ -992,6 +994,8 @@ pub struct Core {
     ai_router_lock: Arc<tokio::sync::Mutex<()>>,
     /// Wakes the loop that copies and moves mail to other accounts.
     transfers: Arc<tokio::sync::Notify>,
+    /// Wakes the loop that downloads attachments ahead of time (#253).
+    prefetch: Arc<tokio::sync::Notify>,
     /// Flectar Mail Sync: this device's setup kept the same on the user's other
     /// devices.
     device_sync: Arc<device_sync::Service>,
@@ -1113,6 +1117,7 @@ impl Core {
             ui_ready: Arc::new(tokio::sync::Notify::new()),
             ai_router_lock: Arc::new(tokio::sync::Mutex::new(())),
             transfers: Arc::new(tokio::sync::Notify::new()),
+            prefetch: Arc::new(tokio::sync::Notify::new()),
             device_sync: Arc::new(device_sync::Service::new()),
             accounts_started: Arc::new(tokio::sync::watch::Sender::new(false)),
             missed_since: Arc::new(std::sync::Mutex::new(Some(missed_since))),
@@ -1369,6 +1374,12 @@ impl Core {
         {
             let c = core.clone();
             tokio::spawn(async move { c.transfer_loop().await });
+        }
+
+        // Attachments of accounts set to download everything (#253).
+        {
+            let c = core.clone();
+            tokio::spawn(async move { c.prefetch_loop().await });
         }
 
         // Flectar Mail Sync, when this device has it on.
@@ -1740,7 +1751,7 @@ impl Core {
                     {
                         continue;
                     }
-                    repo::accounts::insert_with_sync_state(
+                    let id = repo::accounts::insert_with_sync_state(
                         &transaction,
                         &repo::accounts::NewAccount {
                             email: config.email.trim(),
@@ -1760,12 +1771,29 @@ impl Core {
                         &config.settings,
                         "needs_reauth",
                     )?;
+                    let name = config.name.as_deref().and_then(clean_account_name);
+                    repo::accounts::set_name(&transaction, id, name.as_deref())?;
                     imported += 1;
                 }
                 transaction.commit()?;
                 Ok(imported)
             })
             .await
+    }
+
+    /// Give an account the name lists of accounts show instead of its
+    /// address, such as "Work", or take it away with a blank name. People the
+    /// account writes to never see it.
+    pub async fn set_account_name(&self, account_id: i64, name: &str) -> Result<()> {
+        let name = clean_account_name(name);
+        self.db
+            .write(move |conn| repo::accounts::set_name(conn, account_id, name.as_deref()))
+            .await?;
+        // Lists of accounts, such as the sidebar's, show the new name, and
+        // the user's other devices get it.
+        self.bus.emit(CoreEvent::MailUpdated { thread_ids: vec![] });
+        self.device_sync_now();
+        Ok(())
     }
 
     pub async fn reorder_account(&self, source_id: i64, target_id: i64, after: bool) -> Result<()> {
@@ -1834,6 +1862,42 @@ impl Core {
             }
             self.bus.emit(CoreEvent::MailUpdated { thread_ids: vec![] });
         }
+        Ok(())
+    }
+
+    /// Choose what an account downloads ahead of time within its mail history
+    /// (#253). An IMAP or JMAP account's worker downloads messages unless only
+    /// their headers are wanted, and attachments as well when everything is.
+    pub async fn set_account_download(
+        &self,
+        account_id: i64,
+        download: DownloadPolicy,
+    ) -> Result<()> {
+        let settings = self
+            .db
+            .write(move |conn| {
+                let tx = conn.transaction()?;
+                let mut config = repo::accounts::get_config(&tx, account_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("account {account_id}")))?;
+                if !matches!(
+                    config.mail_protocol,
+                    MailProtocol::Imap | MailProtocol::Jmap
+                ) {
+                    return Err(CoreError::Other(format!(
+                        "{} downloads mail as its provider allows",
+                        config.email
+                    )));
+                }
+                config.settings.download = download;
+                repo::accounts::set_settings(&tx, account_id, &config.settings)?;
+                tx.commit()?;
+                Ok(config.settings)
+            })
+            .await?;
+        if let Some(handle) = self.handles.read().await.get(&account_id).cloned() {
+            handle.update_settings(settings);
+        }
+        self.prefetch.notify_one();
         Ok(())
     }
 
@@ -3262,7 +3326,6 @@ impl Core {
                 retire_active_mail_profile(&mut settings);
                 let account_key = account_id.to_string();
                 settings.account_colors.remove(&account_key);
-                settings.account_short_names.remove(&account_key);
                 settings.account_themes.remove(&account_key);
                 settings.signature_defaults.remove(&account_key);
                 settings
@@ -15192,6 +15255,7 @@ mod account_backup_import_tests {
         PortableAccountConfig {
             email: email.into(),
             display_name: Some("Portable account".into()),
+            name: None,
             provider: Provider::Generic,
             auth_kind: AuthKind::Password,
             mail_protocol: MailProtocol::Imap,
