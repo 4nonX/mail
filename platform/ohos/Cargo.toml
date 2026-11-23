@@ -50,3 +50,7 @@ vello = { path = "../../crates/vello" }
 # jmap-client makes its own HTTP clients, which can't take the app's proxy; see
 # patches/jmap-client/README.md.
 jmap-client = { path = "../../crates/jmap-client" }
+# Proton's OpenPGP backend pins a prerelease of kem; see
+# patches/proton-kem/README.md.
+ml-kem = { path = "../../crates/ml-kem-0.2" }
+proton-rpgp = { path = "../../crates/proton-rpgp" }
