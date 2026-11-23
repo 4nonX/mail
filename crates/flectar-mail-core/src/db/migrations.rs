@@ -85,6 +85,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration::Plain(include_str!("migrations/066_sender_identity_bcc.sql")),
     Migration::Plain(include_str!("migrations/067_jmap_body_downloads.sql")),
     Migration::Plain(include_str!("migrations/068_account_names.sql")),
+    Migration::TableRebuild(include_str!("migrations/069_proton.sql")),
 ];
 pub const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -443,6 +444,7 @@ mod tests {
             "pending_actions",
             "pop3_sync_state",
             "pop3_uidls",
+            "proton_sync_state",
             "reply_reminders",
             "returned_receipts",
             "route_cache",
@@ -2033,6 +2035,146 @@ mod tests {
 
         run(&mut conn).unwrap();
         assert_eq!(contacts::list_records(&conn, "", 20).unwrap().len(), 6);
+        assert!(
+            conn.prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .query([])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn proton_accounts_join_a_profile_without_changing_its_accounts() {
+        let mut conn = staged(68);
+        seed_mail_graph(&conn);
+        let before: (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT email, mail_protocol, sync_id FROM accounts WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO accounts (
+                   email, provider, auth_kind, mail_protocol, username, incoming_host,
+                   incoming_port, smtp_host, smtp_port, created_at, settings_json
+                 ) VALUES ('early@proton.test', 'generic', 'password', 'proton', 'early',
+                           'mail.proton.me', 443, '', 0, 0, '{}')",
+                [],
+            )
+            .is_err()
+        );
+
+        upgrade_to(&mut conn, 69).unwrap();
+
+        let after: (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT email, mail_protocol, sync_id FROM accounts WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(after, before);
+        assert!(after.2.is_some());
+        let messages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE account_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(messages, 1);
+
+        let insert = "INSERT INTO accounts (
+               email, provider, auth_kind, mail_protocol, username, incoming_host,
+               incoming_port, smtp_host, smtp_port, created_at, settings_json
+             ) VALUES (?1, 'generic', ?2, ?3, 'me', 'mail.proton.me', 443, '', 0, 0, '{}')";
+        conn.execute(
+            insert,
+            rusqlite::params!["me@proton.test", "password", "proton"],
+        )
+        .unwrap();
+        let proton = conn.last_insert_rowid();
+        // It stays on this device, so it gets no id for other devices.
+        let sync_id: Option<String> = conn
+            .query_row(
+                "SELECT sync_id FROM accounts WHERE id = ?1",
+                [proton],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sync_id, None);
+        assert!(
+            conn.execute(
+                "UPDATE accounts SET sync_id = '0123456789abcdef0123456789abcdef' WHERE id = ?1",
+                [proton],
+            )
+            .is_err()
+        );
+        assert!(
+            conn.execute(
+                insert,
+                rusqlite::params!["oauth@proton.test", "oauth2", "proton"],
+            )
+            .is_err()
+        );
+        // Other accounts still get theirs, and still learn contacts.
+        conn.execute(
+            insert,
+            rusqlite::params!["other@imap.test", "password", "imap"],
+        )
+        .unwrap();
+        let other = conn.last_insert_rowid();
+        let (sync_id, learning): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT a.sync_id,
+                        (SELECT COUNT(*) FROM contact_learning_state WHERE account_id = a.id)
+                 FROM accounts a WHERE a.id = ?1",
+                [other],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(sync_id.is_some());
+        assert_eq!(learning, 1);
+
+        // Proton's ids name a folder and a message once per account.
+        conn.execute(
+            "INSERT INTO folders (account_id, path, proton_id) VALUES (?1, 'Inbox', '0')",
+            [proton],
+        )
+        .unwrap();
+        assert!(
+            conn.execute(
+                "INSERT INTO folders (account_id, path, proton_id) VALUES (?1, 'Again', '0')",
+                [proton],
+            )
+            .is_err()
+        );
+        conn.execute(
+            "INSERT INTO folders (account_id, path, proton_id) VALUES (?1, 'Inbox', '0')",
+            [other],
+        )
+        .unwrap();
+        let folder = conn.last_insert_rowid();
+        let message = "INSERT INTO messages (
+               account_id, folder_id, subject, from_addr, to_json, cc_json, date, proton_id
+             ) VALUES (?1, ?2, 's', 'a@b.test', '[]', '[]', 1, 'message-id')";
+        conn.execute(message, [other, folder]).unwrap();
+        assert!(conn.execute(message, [other, folder]).is_err());
+        // A conversation is one thread, and the account has one place in
+        // Proton's stream of changes.
+        let thread = "INSERT INTO threads (account_id, proton_id, subject_norm)
+                      VALUES (?1, 'conversation', 's')";
+        conn.execute(thread, [proton]).unwrap();
+        assert!(conn.execute(thread, [proton]).is_err());
+        let state = "INSERT INTO proton_sync_state (account_id, event_id) VALUES (?1, 'e')";
+        conn.execute(state, [proton]).unwrap();
+        assert!(conn.execute(state, [proton]).is_err());
+
         assert!(
             conn.prepare("PRAGMA foreign_key_check")
                 .unwrap()

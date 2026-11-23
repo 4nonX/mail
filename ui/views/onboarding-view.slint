@@ -11,6 +11,7 @@ import { OAuthSetupDialog } from "../dialogs/oauth-setup-dialog.slint";
 import { AppTheme } from "../design-system.slint";
 import { TypeScale } from "../typography.slint";
 import { SyncUi } from "../device-sync.slint";
+import { ProtonSignIn, ProtonSignInSteps } from "../components/proton-sign-in.slint";
 
 export component OnboardingView inherits Rectangle {
     in property <bool> google-available: false;
@@ -73,9 +74,11 @@ export component OnboardingView inherits Rectangle {
     in property <string> privacy-policy-url;
     callback open-link(string);
 
+    // Proton and JMAP find their servers themselves.
+    private property <bool> needs-servers: root.account-protocol != "jmap" && root.account-protocol != "proton";
     private property <bool> account-form-valid: root.account-email != ""
         && root.account-password != ""
-        && (root.account-protocol == "jmap" || (
+        && (!root.needs-servers || (
             root.incoming-host != ""
             && root.incoming-port != ""
             && (!root.account-sends-mail || (root.smtp-host != "" && root.smtp-port != ""))));
@@ -304,7 +307,8 @@ export component OnboardingView inherits Rectangle {
                     wrap: word-wrap;
                 }
                 Text {
-                    text: root.account-protocol == "jmap" ? @tr("Connect using JMAP for mail sync and sending.")
+                    text: root.account-protocol == "proton" ? @tr("Sign in to Proton Mail. Its mail is decrypted on this device.")
+                        : root.account-protocol == "jmap" ? @tr("Connect using JMAP for mail sync and sending.")
                         : root.account-protocol == "pop3" ? @tr("Connect using POP3 and SMTP. Mail is downloaded to this device and kept here.")
                         : @tr("Connect using IMAP and SMTP.");
                     wrap: word-wrap; height: self.preferred-height;
@@ -333,11 +337,11 @@ export component OnboardingView inherits Rectangle {
                 FormField {
                     enabled: !root.account-setup-in-progress;
                     height: 60px;
-                    label: root.account-protocol == "jmap" ? @tr("Password, app password, or API token") : @tr("Password or app password");
+                    label: root.account-protocol == "proton" ? @tr("Proton password") : root.account-protocol == "jmap" ? @tr("Password, app password, or API token") : @tr("Password or app password");
                     label-color: root.muted-text;
                     value <=> root.account-password;
                     input-type: password;
-                    placeholder: root.account-protocol == "jmap" ? @tr("Password, app password, or API token") : @tr("Password or app password");
+                    placeholder: root.account-protocol == "proton" ? @tr("Proton password") : root.account-protocol == "jmap" ? @tr("Password, app password, or API token") : @tr("Password or app password");
                 }
                 HorizontalBox {
                     height: 42px;
@@ -367,6 +371,14 @@ export component OnboardingView inherits Rectangle {
                         primary: root.account-protocol == "jmap";
                         clicked => { root.choose-protocol("jmap"); }
                     }
+                    Button {
+                        horizontal-stretch: 1;
+                        height: 42px;
+                        text: @tr("Proton");
+                        enabled: !root.account-setup-in-progress;
+                        primary: root.account-protocol == "proton";
+                        clicked => { root.choose-protocol("proton"); }
+                    }
                 }
                 if root.account-protocol == "jmap" : LineEdit {
                     height: 42px;
@@ -379,7 +391,7 @@ export component OnboardingView inherits Rectangle {
                     font-size: TypeScale.caption;
                     wrap: word-wrap; height: self.preferred-height;
                 }
-                if root.account-protocol != "jmap" : HorizontalBox {
+                if root.needs-servers : HorizontalBox {
                     height: 60px;
                     padding: 0px;
                     spacing: 8px;
@@ -401,7 +413,7 @@ export component OnboardingView inherits Rectangle {
                         placeholder: MailPorts.incoming(root.account-protocol, root.incoming-security);
                     }
                 }
-                if root.account-protocol != "jmap" && root.account-sends-mail : HorizontalBox {
+                if root.needs-servers && root.account-sends-mail : HorizontalBox {
                     height: 60px;
                     padding: 0px;
                     spacing: 8px;
@@ -427,7 +439,7 @@ export component OnboardingView inherits Rectangle {
                     text: @tr("Proton Bridge: use the local servers, ports and password shown in Bridge, and match its encryption settings.");
                     color: root.muted-text; font-size: TypeScale.caption; wrap: word-wrap; height: self.preferred-height;
                 }
-                if root.account-protocol != "jmap" : MailSecurityFields {
+                if root.needs-servers : MailSecurityFields {
                     incoming-protocol: root.account-protocol;
                     incoming-security <=> root.incoming-security;
                     smtp-security <=> root.smtp-security;
@@ -438,7 +450,7 @@ export component OnboardingView inherits Rectangle {
                     certificate-pem <=> root.trusted-certificate-pem;
                     import-certificate => { root.import-mail-certificate(); }
                 }
-                if root.account-protocol != "jmap" : MailAdvancedFields {
+                if root.needs-servers : MailAdvancedFields {
                     incoming-protocol: root.account-protocol;
                     expanded <=> root.advanced-open;
                     sends-mail <=> root.account-sends-mail;
@@ -465,7 +477,11 @@ export component OnboardingView inherits Rectangle {
                         font-size: TypeScale.caption;
                     }
                 }
-                Button {
+                if ProtonSignIn.step != "" : ProtonSignInSteps {
+                    body-text: root.body-text;
+                    muted-text: root.muted-text;
+                }
+                if ProtonSignIn.step == "" : Button {
                     height: 42px;
                     text: root.account-setup-in-progress ? @tr("Connecting…") : @tr("Connect account");
                     primary: true;

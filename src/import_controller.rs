@@ -461,6 +461,7 @@ fn destination_name(destinations: &[Option<MailAccount>], index: usize, device: 
         MailProtocol::Jmap => "JMAP",
         MailProtocol::Gmail => "Gmail",
         MailProtocol::Pop3 => "POP3",
+        MailProtocol::Proton => "Proton",
         MailProtocol::Local => "",
     };
     format!("{} ({protocol})", account.email)

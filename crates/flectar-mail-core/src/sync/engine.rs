@@ -433,6 +433,11 @@ pub fn spawn_account(ctx: SyncCtx, config: AccountConfig) -> AccountHandle {
                 None,
                 None,
             ),
+            MailProtocol::Proton => (
+                crate::proton::sync::spawn(ctx, config, rx, body_rx, settings_rx),
+                None,
+                None,
+            ),
             MailProtocol::Imap => {
                 let (send_tx, send_rx) = mpsc::channel(1);
                 // These carry idempotent wakeups rather than work. A single
@@ -1734,7 +1739,7 @@ pub async fn status_for_account(db: &Db, account_id: i64) -> Result<SyncStatus> 
             )?,
             // The folders the history worker fills, as `repo::folders::list`
             // shows them.
-            MailProtocol::Imap | MailProtocol::Jmap => conn.query_row(
+            MailProtocol::Imap | MailProtocol::Jmap | MailProtocol::Proton => conn.query_row(
                 "SELECT COALESCE(SUM(backfill_done), 0), COUNT(*)
                  FROM folders
                  WHERE account_id = ?1 AND COALESCE(role, '') <> 'all'

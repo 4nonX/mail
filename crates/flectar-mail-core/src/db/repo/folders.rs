@@ -168,15 +168,19 @@ pub fn list_info(conn: &Connection, account_id: Option<i64>) -> Result<Vec<Folde
             id: f.id,
             account_id: f.account_id,
             parent_id: f.parent_id,
-            // IMAP names are modified UTF-7 on the wire; JMAP names and
-            // folders on this device are stored as shown.
+            // IMAP names are modified UTF-7 on the wire; JMAP and Proton
+            // names and folders on this device are stored as shown.
             display_name: match protocols.get(&f.account_id) {
                 Some(MailProtocol::Gmail | MailProtocol::Imap) => {
                     crate::imap::decode_mailbox_name(&f.path)
                 }
-                Some(MailProtocol::Jmap | MailProtocol::Pop3 | MailProtocol::Local) | None => {
-                    f.path.clone()
-                }
+                Some(
+                    MailProtocol::Jmap
+                    | MailProtocol::Pop3
+                    | MailProtocol::Local
+                    | MailProtocol::Proton,
+                )
+                | None => f.path.clone(),
             },
             is_jmap: f.jmap_id.is_some(),
             path: f.path,

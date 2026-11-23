@@ -90,6 +90,8 @@ enum Remote {
         /// import it like mail that arrives.
         insert: bool,
     },
+    /// The session the account's workers use, as Proton allows one.
+    Proton,
 }
 
 impl crate::Core {
@@ -123,6 +125,7 @@ impl crate::Core {
                     "mail kept on this device is not uploaded".into(),
                 ));
             }
+            MailProtocol::Proton => Remote::Proton,
         };
         // Folders made elsewhere since the account last synced are used,
         // not made again.
@@ -150,6 +153,13 @@ impl crate::Core {
                 jmap::sync::sync_mailboxes(&self.sync_ctx(), account_id, client).await?;
             }
             Remote::Gmail { uploader, .. } => uploader.refresh_labels().await?,
+            Remote::Proton => {
+                let connected =
+                    crate::proton::sync::Link::for_account(&self.sync_ctx(), account_id)
+                        .get(config.proxy_owner())
+                        .await?;
+                crate::proton::sync::sync_labels(&self.sync_ctx(), account_id, &connected).await?;
+            }
         }
         let targets = self
             .upload_targets(account_id, &source.folders, &chosen, &parent_folder)
@@ -290,6 +300,7 @@ impl crate::Core {
                             "mail kept on this device is not uploaded".into(),
                         ));
                     }
+                    MailProtocol::Proton => Remote::Proton,
                 };
                 entry.insert((config, remote))
             }
@@ -528,6 +539,10 @@ impl crate::Core {
                     )
                     .await
                 }
+                Remote::Proton => {
+                    self.proton_upload(config, message, target, seen, flagged)
+                        .await
+                }
             };
             match result {
                 Err(error) if attempt < RETRIES && retryable(&error) => {
@@ -550,7 +565,7 @@ impl crate::Core {
                             *selected = None;
                         }
                         Remote::Jmap { client } => *client = None,
-                        Remote::Gmail { .. } => {}
+                        Remote::Gmail { .. } | Remote::Proton => {}
                     }
                     tokio::time::sleep(
                         Duration::from_secs(2u64.pow(attempt).min(60))
@@ -632,6 +647,48 @@ impl crate::Core {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Imports the message into the account's folder on Proton, encrypted
+    /// to the account's own key.
+    async fn proton_upload(
+        &self,
+        config: &AccountConfig,
+        message: &Incoming,
+        target: &Target,
+        seen: bool,
+        flagged: bool,
+    ) -> Result<Outcome> {
+        let folder_id = target.folder_id;
+        let (label, role) = self
+            .db
+            .read(move |conn| {
+                let label = crate::proton::send::folder_proton_id(conn, folder_id)?;
+                let role = repo::folders::get(conn, folder_id)?.and_then(|folder| folder.role);
+                Ok((label, role))
+            })
+            .await?;
+        let label = label
+            .ok_or_else(|| CoreError::Other(format!("folder {} is not on Proton", target.path)))?;
+        let ctx = self.sync_ctx();
+        let link = crate::proton::sync::Link::for_account(&ctx, config.id);
+        let connected = link.get(config.proxy_owner()).await?;
+        let sent = role.as_deref() == Some(roles::SENT);
+        Ok(
+            match crate::proton::send::import(&connected, &label, &message.raw, seen, flagged, sent)
+                .await?
+            {
+                crate::proton::send::Imported::Stored => {
+                    // The import shows here with the account's next changes.
+                    self.nudge(Some(config.id), || sync::engine::SyncCmd::SyncNow {
+                        complete: None,
+                    })
+                    .await;
+                    Outcome::Uploaded
+                }
+                crate::proton::send::Imported::Refused(reason) => Outcome::Refused(reason),
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

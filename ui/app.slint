@@ -4,6 +4,7 @@ import { MailAttachments } from "models.slint";
 import { AttachmentPreviewDialog } from "dialogs/attachment-preview-dialog.slint";
 export { MailAttachments, MailAttachment } from "models.slint";
 export { ZoomApi } from "components/zoom-controls.slint";
+export { ProtonSignIn } from "components/proton-sign-in.slint";
 export { ReadReceipts, ReturnedReceipt } from "read-receipts.slint";
 export { FolderRoles, FolderRoleRow } from "folder-roles.slint";
 export { MessageSource } from "message-source.slint";
@@ -556,6 +557,12 @@ export global I18n {
         if (key == "Could not update mail history: {}") { return @tr("Could not update mail history: {}", argument); }
         if (key == "Connected {}. Initial sync is running in the background.") { return @tr("Connected {}. Initial sync is running in the background.", argument); }
         if (key == "Account setup failed: {}") { return @tr("Account setup failed: {}", argument); }
+        if (key == "The browser did not open. Open this address in it to go on: {}") { return @tr("The browser did not open. Open this address in it to go on: {}", argument); }
+        if (key == "The Proton sign-in was cancelled.") { return @tr("The Proton sign-in was cancelled."); }
+        if (key == "Signing in to Proton…") { return @tr("Signing in to Proton…"); }
+        if (key == "Solve Proton's CAPTCHA in your browser to go on.") { return @tr("Solve Proton's CAPTCHA in your browser to go on."); }
+        if (key == "Enter the code from your authenticator app.") { return @tr("Enter the code from your authenticator app."); }
+        if (key == "Enter this Proton account's mailbox password.") { return @tr("Enter this Proton account's mailbox password."); }
         if (key == "OAuth failed: {}") { return @tr("OAuth failed: {}", argument); }
         if (key == "Reconnected {}. Synchronization is resuming.") { return @tr("Reconnected {}. Synchronization is resuming.", argument); }
         if (key == "Reconnection failed: {}") { return @tr("Reconnection failed: {}", argument); }

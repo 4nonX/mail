@@ -1,0 +1,85 @@
+import { VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button } from "button.slint";
+import { TextLink } from "controls.slint";
+import { FormField } from "settings-components.slint";
+import { TypeScale } from "../typography.slint";
+
+// What a Proton sign-in asks for after the password: a CAPTCHA solved in the
+// browser, the code from an authenticator app, or the mailbox password of an
+// account with two passwords.
+export global ProtonSignIn {
+    // "", "captcha", "totp" or "mailbox".
+    in-out property <string> step;
+    // Waiting for Proton's answer.
+    in-out property <bool> busy;
+    callback answer(string);
+    callback cancel();
+    callback open-captcha();
+}
+
+export component ProtonSignInSteps inherits VerticalBox {
+    in property <color> body-text;
+    in property <color> muted-text;
+    private property <string> value;
+
+    padding: 0px;
+    spacing: 10px;
+
+    changed visible => { self.value = ""; }
+
+    if ProtonSignIn.step == "captcha" : Text {
+        text: @tr("Proton wants to check that a person is signing in. Solve the CAPTCHA in the browser page that opened; the sign-in goes on by itself afterwards.");
+        color: root.body-text;
+        font-size: TypeScale.secondary;
+        wrap: word-wrap;
+        height: self.preferred-height;
+    }
+    if ProtonSignIn.step == "captcha" : HorizontalLayout {
+        alignment: start;
+        TextLink {
+            text: @tr("Open the CAPTCHA page again");
+            clicked => { ProtonSignIn.open-captcha(); }
+        }
+    }
+    if ProtonSignIn.step == "totp" : FormField {
+        enabled: !ProtonSignIn.busy;
+        height: 60px;
+        label: @tr("Code from your authenticator app");
+        label-color: root.muted-text;
+        value <=> root.value;
+        placeholder: @tr("6-digit code");
+    }
+    if ProtonSignIn.step == "mailbox" : FormField {
+        enabled: !ProtonSignIn.busy;
+        height: 60px;
+        label: @tr("Mailbox password");
+        label-color: root.muted-text;
+        value <=> root.value;
+        input-type: password;
+        placeholder: @tr("The second password of this Proton account");
+    }
+    HorizontalBox {
+        padding: 0px;
+        spacing: 8px;
+        Button {
+            horizontal-stretch: 1;
+            height: 40px;
+            text: @tr("Cancel");
+            clicked => {
+                root.value = "";
+                ProtonSignIn.cancel();
+            }
+        }
+        if ProtonSignIn.step != "captcha" : Button {
+            horizontal-stretch: 1;
+            height: 40px;
+            primary: true;
+            text: ProtonSignIn.busy ? @tr("Connecting…") : @tr("Continue");
+            enabled: root.value != "" && !ProtonSignIn.busy;
+            clicked => {
+                ProtonSignIn.answer(root.value);
+                root.value = "";
+            }
+        }
+    }
+}

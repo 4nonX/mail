@@ -177,6 +177,98 @@ pub async fn metadata_page(
         .await
 }
 
+/// The metadata of the messages with these ids that still exist, at most
+/// [`PAGE_SIZE`] of them.
+pub async fn metadata_of(session: &Session, ids: &[String]) -> ApiResult<Vec<Metadata>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut path = format!("/mail/v4/messages?PageSize={PAGE_SIZE}");
+    for id in ids {
+        path.push_str("&ID[]=");
+        path.extend(percent_encoding::utf8_percent_encode(
+            id,
+            percent_encoding::NON_ALPHANUMERIC,
+        ));
+    }
+    let page: MetadataPage = session.get(&path).await?;
+    Ok(page.messages)
+}
+
+/// One page of the messages matching `query` (already encoded parameters),
+/// newest first.
+pub async fn search_page(session: &Session, query: &str, page: u64) -> ApiResult<MetadataPage> {
+    session
+        .get(&format!(
+            "/mail/v4/messages?{query}&Page={page}&PageSize={PAGE_SIZE}&Sort=Time&Desc=1"
+        ))
+        .await
+}
+
+/// Deletes every message in a folder, such as the Trash.
+pub async fn empty_label(session: &Session, label_id: &str) -> ApiResult<()> {
+    let _: serde_json::Value = session
+        .delete(&format!(
+            "/mail/v4/messages/empty?LabelID={}",
+            percent_encoding::utf8_percent_encode(label_id, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LabelAnswer {
+    label: Label,
+}
+
+/// Makes a label (type 1) or folder (type 3).
+pub async fn create_label(
+    session: &Session,
+    kind: u8,
+    name: &str,
+    color: &str,
+    parent_id: Option<&str>,
+) -> ApiResult<Label> {
+    let mut body = json!({ "Name": name, "Color": color, "Type": kind });
+    if let Some(parent_id) = parent_id {
+        body["ParentID"] = json!(parent_id);
+    }
+    let answer: LabelAnswer = session.post("/core/v4/labels", &body).await?;
+    Ok(answer.label)
+}
+
+/// Renames a label or folder, keeping its color and place.
+pub async fn rename_label(session: &Session, label: &Label, name: &str) -> ApiResult<Label> {
+    let mut body = json!({ "Name": name, "Color": label.color });
+    if let Some(parent_id) = &label.parent_id {
+        body["ParentID"] = json!(parent_id);
+    }
+    let answer: LabelAnswer = session
+        .put(
+            &format!(
+                "/core/v4/labels/{}",
+                percent_encoding::utf8_percent_encode(
+                    &label.id,
+                    percent_encoding::NON_ALPHANUMERIC
+                )
+            ),
+            &body,
+        )
+        .await?;
+    Ok(answer.label)
+}
+
+pub async fn delete_label(session: &Session, id: &str) -> ApiResult<()> {
+    let _: serde_json::Value = session
+        .delete(&format!(
+            "/core/v4/labels/{}",
+            percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
+        ))
+        .await?;
+    Ok(())
+}
+
 pub async fn message(session: &Session, id: &str) -> ApiResult<Message> {
     let answer: MessageAnswer = session
         .get(&format!(
@@ -192,9 +284,7 @@ async fn attachment_data(session: &Session, id: &str) -> ApiResult<Vec<u8>> {
         "/mail/v4/attachments/{}",
         percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
     );
-    let (status, bytes) = session
-        .send_raw(reqwest::Method::GET, &path, None, None)
-        .await?;
+    let (status, bytes) = session.get_bytes(&path).await?;
     if status == 200 {
         return Ok(bytes);
     }

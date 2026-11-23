@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 
 /// Proton's API for mail accounts.
 pub const API_BASE: &str = "https://mail.proton.me/api";
+/// The host of [`API_BASE`].
+pub const API_HOST: &str = "mail.proton.me";
 
 /// The app identity sent with every request. Proton only serves apps it
 /// knows, so this names one of Proton's own; set
@@ -132,6 +134,11 @@ impl From<Failure> for CoreError {
                 (400 | 422, _) if error.code == 8002 => {
                     CoreError::Auth(format!("Proton refused the sign-in: {}", error.message))
                 }
+                // What Proton turns down in its own words it turns down
+                // again, so it is not tried again.
+                (400 | 402 | 403 | 404 | 409 | 413 | 422, _) => {
+                    CoreError::Other(format!("Proton: {}", error.message))
+                }
                 _ => CoreError::Network(format!(
                     "Proton answered {} (code {}): {}",
                     error.status, error.code, error.message
@@ -170,6 +177,13 @@ pub(crate) fn parse_answer<T: DeserializeOwned>(status: u16, body: &[u8]) -> Api
     }))
 }
 
+/// One part of a form: a field, or a file when `file` names its type.
+pub struct FormPart<'a> {
+    pub name: &'a str,
+    pub file: Option<&'a str>,
+    pub data: &'a [u8],
+}
+
 /// A Proton API session. Requests that fail because the access token
 /// expired refresh it once and are sent again.
 pub struct Session {
@@ -177,7 +191,16 @@ pub struct Session {
     base: String,
     app_version: String,
     tokens: Mutex<Option<Tokens>>,
+    /// One refresh at a time: a refresh token works once, so two requests
+    /// that find the access token expired must not both spend it.
+    refreshing: Mutex<()>,
+    saver: std::sync::Mutex<Option<Saver>>,
 }
+
+/// Keeps a refreshed token pair. It runs before the request that needed the
+/// refresh goes on, so the pair is never only in memory.
+pub type Saver =
+    std::sync::Arc<dyn Fn(Tokens) -> futures::future::BoxFuture<'static, Result<()>> + Send + Sync>;
 
 #[derive(Serialize)]
 #[serde(rename_all = "PascalCase")]
@@ -211,7 +234,14 @@ impl Session {
             base: base.trim_end_matches('/').to_owned(),
             app_version: app_version(),
             tokens: Mutex::new(tokens),
+            refreshing: Mutex::new(()),
+            saver: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Has every refreshed token pair kept by `saver`.
+    pub fn keep_tokens_with(&self, saver: Saver) {
+        *self.saver.lock().unwrap_or_else(|e| e.into_inner()) = Some(saver);
     }
 
     pub fn base(&self) -> &str {
@@ -235,12 +265,26 @@ impl Session {
         body: Option<&Value>,
         verification: Option<&HumanVerificationAnswer>,
     ) -> ApiResult<T> {
+        let used = self.tokens().await;
         match self.send(method.clone(), path, body, verification).await {
-            Err(Failure::Api(error)) if error.status == 401 && self.refresh().await.is_ok() => {
+            Err(Failure::Api(error)) if error.status == 401 => {
+                if self.refresh_after(used.as_ref()).await.is_err() {
+                    return Err(Failure::Api(error));
+                }
                 self.send(method, path, body, verification).await
             }
             other => other,
         }
+    }
+
+    /// Refreshes the tokens unless another request already replaced the
+    /// ones `used` since.
+    async fn refresh_after(&self, used: Option<&Tokens>) -> ApiResult<()> {
+        let _one = self.refreshing.lock().await;
+        if self.tokens().await.as_ref() != used {
+            return Ok(());
+        }
+        self.refresh_unguarded().await
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
@@ -265,6 +309,97 @@ impl Session {
         verification: Option<&HumanVerificationAnswer>,
     ) -> ApiResult<T> {
         let (status, bytes) = self.send_raw(method, path, body, verification).await?;
+        parse_answer(status, &bytes)
+    }
+
+    pub async fn delete<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
+        self.call(reqwest::Method::DELETE, path, None, None).await
+    }
+
+    /// Fetches data that is not JSON, such as an attachment, refreshing the
+    /// access token once when it expired.
+    pub async fn get_bytes(&self, path: &str) -> ApiResult<(u16, Vec<u8>)> {
+        let used = self.tokens().await;
+        let (status, bytes) = self
+            .send_raw(reqwest::Method::GET, path, None, None)
+            .await?;
+        if status != 401 || self.refresh_after(used.as_ref()).await.is_err() {
+            return Ok((status, bytes));
+        }
+        self.send_raw(reqwest::Method::GET, path, None, None).await
+    }
+
+    /// Posts a form of named parts, some of them files.
+    pub async fn post_form<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        parts: &[FormPart<'_>],
+    ) -> ApiResult<T> {
+        let used = self.tokens().await;
+        match self.send_form(path, parts).await {
+            Err(Failure::Api(error)) if error.status == 401 => {
+                if self.refresh_after(used.as_ref()).await.is_err() {
+                    return Err(Failure::Api(error));
+                }
+                self.send_form(path, parts).await
+            }
+            other => other,
+        }
+    }
+
+    async fn send_form<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        parts: &[FormPart<'_>],
+    ) -> ApiResult<T> {
+        let boundary = format!("flectar-{:032x}", rand::random::<u128>());
+        let mut body = Vec::new();
+        for part in parts {
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            let name = part.name.replace(['"', '\r', '\n'], "_");
+            match part.file {
+                Some(content_type) => body.extend_from_slice(
+                    format!(
+                        "Content-Disposition: form-data; name=\"{name}\"; filename=\"blob\"\r\nContent-Type: {content_type}\r\n\r\n"
+                    )
+                    .as_bytes(),
+                ),
+                None => body.extend_from_slice(
+                    format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
+                ),
+            }
+            body.extend_from_slice(part.data);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+        let http = http_client(self.owner)?;
+        let mut request = http
+            .post(format!("{}{}", self.base, path))
+            .header("x-pm-appversion", &self.app_version)
+            .header("Accept", "application/vnd.protonmail.v1+json")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            // A large upload gets time at 64 KiB/s.
+            .timeout(std::time::Duration::from_secs(
+                120 + body.len() as u64 / (64 * 1024),
+            ))
+            .body(body);
+        if let Some(tokens) = self.tokens.lock().await.as_ref() {
+            request = request
+                .header("x-pm-uid", &tokens.uid)
+                .bearer_auth(&tokens.access_token);
+        }
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() || error.is_connect() {
+                CoreError::Offline
+            } else {
+                CoreError::Network(format!("Proton request failed: {error}"))
+            }
+        })?;
+        let status = response.status().as_u16();
+        let bytes = http_body::bytes(response, MAX_RESPONSE_BYTES, "Proton answer").await?;
         parse_answer(status, &bytes)
     }
 
@@ -304,12 +439,31 @@ impl Session {
             }
         })?;
         let status = response.status().as_u16();
+        if status == 429 || status == 503 {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            return Err(Failure::Core(CoreError::RateLimited {
+                service: "Proton".into(),
+                kind: crate::error::LimitKind::Requests,
+                retry_after,
+                detail: format!("Proton answered {status}"),
+            }));
+        }
         let bytes = http_body::bytes(response, MAX_RESPONSE_BYTES, "Proton answer").await?;
         Ok((status, bytes))
     }
 
     /// Trades the refresh token for a new pair.
     pub async fn refresh(&self) -> ApiResult<()> {
+        let _one = self.refreshing.lock().await;
+        self.refresh_unguarded().await
+    }
+
+    async fn refresh_unguarded(&self) -> ApiResult<()> {
         let Some(current) = self.tokens().await else {
             return Err(Failure::Core(CoreError::NeedsReauth));
         };
@@ -336,12 +490,16 @@ impl Session {
                 }
                 other => other,
             })?;
-        self.set_tokens(Some(Tokens {
+        let tokens = Tokens {
             uid: answer.uid.unwrap_or(current.uid),
             access_token: answer.access_token,
             refresh_token: answer.refresh_token,
-        }))
-        .await;
+        };
+        self.set_tokens(Some(tokens.clone())).await;
+        let saver = self.saver.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(saver) = saver {
+            saver(tokens).await?;
+        }
         Ok(())
     }
 }

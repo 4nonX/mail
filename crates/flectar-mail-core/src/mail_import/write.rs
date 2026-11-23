@@ -227,7 +227,10 @@ impl crate::Core {
         let protocol = self.account_protocol(account_id).await?;
         match protocol {
             MailProtocol::Pop3 | MailProtocol::Local => {}
-            MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Jmap => {
+            MailProtocol::Gmail
+            | MailProtocol::Imap
+            | MailProtocol::Jmap
+            | MailProtocol::Proton => {
                 return self
                     .upload_mail(
                         super::upload::Upload {

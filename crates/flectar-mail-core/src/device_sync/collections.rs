@@ -934,7 +934,11 @@ fn apply_account(
             return Ok(Outcome::Ignored);
         }
     };
-    if crate::validate_portable_account(&config).is_err() {
+    // Proton accounts stay on the device they signed in on, so one arriving
+    // from elsewhere is not taken.
+    if config.mail_protocol == MailProtocol::Proton
+        || crate::validate_portable_account(&config).is_err()
+    {
         return Ok(Outcome::Ignored);
     }
     let name = config.name.as_deref().and_then(clean_account_name);

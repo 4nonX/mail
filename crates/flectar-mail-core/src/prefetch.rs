@@ -81,7 +81,7 @@ impl Core {
             let everything = config.settings.download == DownloadPolicy::Everything
                 && matches!(
                     config.mail_protocol,
-                    MailProtocol::Imap | MailProtocol::Jmap
+                    MailProtocol::Imap | MailProtocol::Jmap | MailProtocol::Proton
                 );
             if !everything || self.pace.account(config.id).paused().is_some() {
                 continue;

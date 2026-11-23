@@ -8,7 +8,8 @@
 use super::api::{ApiResult, Session};
 use base64::Engine as _;
 use proton_crypto::crypto::{
-    DataEncoding, Decryptor, DecryptorSync, PGPProviderSync, VerifiedData,
+    DataEncoding, Decryptor, DecryptorSync, Encryptor, EncryptorSync, PGPMessage, PGPProviderSync,
+    SessionKeyAlgorithm, Signer, SignerSync, VerifiedData,
 };
 use proton_crypto_account::keys::{AddressKeys, LockedKey, UnlockedAddressKey, UserKeys};
 use proton_crypto_account::salts::{KeySecret, Salt, Salts};
@@ -128,6 +129,46 @@ pub trait Decrypter: Send + Sync {
     ) -> Result<Vec<u8>, String>;
     /// The addresses whose keys opened.
     fn address_ids(&self) -> Vec<String>;
+    /// Encrypts `plain` to the address's own key and signs it, as Proton
+    /// keeps the account's own mail.
+    fn encrypt_message(&self, address_id: &str, plain: &[u8]) -> Result<Sealed, String>;
+    /// Encrypts an attachment to the address's own key, with a signature of
+    /// the plain data.
+    fn encrypt_attachment(&self, address_id: &str, plain: &[u8]) -> Result<Sealed, String>;
+    /// The session key in `key_packets`, which were encrypted to the address.
+    fn session_key(&self, address_id: &str, key_packets: &[u8]) -> Result<SessionKey, String>;
+    /// `key` encrypted to someone's armored public key.
+    fn seal_session_key(&self, key: &SessionKey, public_key: &str) -> Result<Vec<u8>, String>;
+}
+
+/// Something encrypted, in the parts Proton asks for.
+pub struct Sealed {
+    /// The whole message, armored.
+    pub armored: String,
+    /// The session key, encrypted to the address.
+    pub key_packets: Vec<u8>,
+    /// What the session key encrypts.
+    pub data_packet: Vec<u8>,
+    /// A signature of the plain data, apart from it.
+    pub signature: Vec<u8>,
+    pub session_key: SessionKey,
+}
+
+/// The key that encrypts one body or attachment.
+#[derive(Clone)]
+pub struct SessionKey {
+    pub key: Vec<u8>,
+    /// As Proton names it, such as `aes256`.
+    pub algorithm: &'static str,
+}
+
+impl SessionKey {
+    fn algorithm(&self) -> SessionKeyAlgorithm {
+        match self.algorithm {
+            "aes128" => SessionKeyAlgorithm::Aes128,
+            _ => SessionKeyAlgorithm::Aes256,
+        }
+    }
 }
 
 struct Keyring<P: PGPProviderSync> {
@@ -186,6 +227,109 @@ where
             .filter(|(_, keys)| !keys.is_empty())
             .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    fn encrypt_message(&self, address_id: &str, plain: &[u8]) -> Result<Sealed, String> {
+        self.seal(address_id, plain)
+    }
+
+    fn encrypt_attachment(&self, address_id: &str, plain: &[u8]) -> Result<Sealed, String> {
+        self.seal(address_id, plain)
+    }
+
+    fn session_key(&self, address_id: &str, key_packets: &[u8]) -> Result<SessionKey, String> {
+        let keys = self.keys(address_id)?;
+        let private: Vec<&P::PrivateKey> = keys.iter().map(|key| &key.private_key).collect();
+        let key = self
+            .provider
+            .new_decryptor()
+            .with_decryption_keys(private)
+            .decrypt_session_key(key_packets)
+            .map_err(|error| format!("could not read the session key: {error}"))?;
+        self.export(&key)
+    }
+
+    fn seal_session_key(&self, key: &SessionKey, public_key: &str) -> Result<Vec<u8>, String> {
+        let recipient = self
+            .provider
+            .public_key_import(public_key, DataEncoding::Armor)
+            .map_err(|error| format!("a recipient's key can't be read: {error}"))?;
+        let session_key = self
+            .provider
+            .session_key_import(&key.key, key.algorithm())
+            .map_err(|error| format!("could not use the session key: {error}"))?;
+        self.provider
+            .new_encryptor()
+            .with_encryption_key(&recipient)
+            .encrypt_session_key(&session_key)
+            .map_err(|error| format!("could not encrypt to a recipient's key: {error}"))
+    }
+}
+
+impl<P: PGPProviderSync> Keyring<P> {
+    /// The key the address encrypts and signs mail with.
+    fn primary(&self, address_id: &str) -> Result<&UnlockedAddressKey<P>, String> {
+        let keys = self.keys(address_id)?;
+        Ok(keys
+            .iter()
+            .find(|key| key.primary && !key.is_v6)
+            .or_else(|| keys.iter().find(|key| key.primary))
+            .unwrap_or(&keys[0]))
+    }
+
+    fn export(&self, key: &P::SessionKey) -> Result<SessionKey, String> {
+        let (bytes, algorithm) = self
+            .provider
+            .session_key_export(key)
+            .map_err(|error| format!("could not read the session key: {error}"))?;
+        let algorithm = match algorithm {
+            SessionKeyAlgorithm::Aes128 => "aes128",
+            SessionKeyAlgorithm::Aes256 => "aes256",
+            SessionKeyAlgorithm::Unknown => {
+                return Err("the session key's cipher is not one Proton takes".into());
+            }
+        };
+        Ok(SessionKey {
+            key: bytes.as_ref().to_vec(),
+            algorithm,
+        })
+    }
+
+    fn seal(&self, address_id: &str, plain: &[u8]) -> Result<Sealed, String> {
+        let own = self.primary(address_id)?;
+        let message = self
+            .provider
+            .new_encryptor()
+            .with_encryption_key(&own.public_key)
+            .with_signing_key(&own.private_key)
+            .encrypt(plain)
+            .map_err(|error| format!("could not encrypt: {error}"))?;
+        let signature = self
+            .provider
+            .new_signer()
+            .with_signing_key(&own.private_key)
+            .sign_detached(plain, DataEncoding::Bytes)
+            .map_err(|error| format!("could not sign: {error}"))?;
+        let key_packets = message.as_key_packets().to_vec();
+        let session_key = self
+            .provider
+            .new_decryptor()
+            .with_decryption_key(&own.private_key)
+            .decrypt_session_key(&key_packets)
+            .map_err(|error| format!("could not read the session key: {error}"))?;
+        let armored = String::from_utf8(
+            message
+                .armor()
+                .map_err(|error| format!("could not armor: {error}"))?,
+        )
+        .map_err(|_| "the armored message is not text".to_owned())?;
+        Ok(Sealed {
+            armored,
+            key_packets,
+            data_packet: message.as_data_packet().to_vec(),
+            signature,
+            session_key: self.export(&session_key)?,
+        })
     }
 }
 

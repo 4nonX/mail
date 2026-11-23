@@ -1567,7 +1567,7 @@ async fn send_action(
                 // Mail kept on this device is never sent.
                 MailProtocol::Local => false,
                 // These submit through their own APIs, which file sent mail.
-                MailProtocol::Gmail | MailProtocol::Jmap => false,
+                MailProtocol::Gmail | MailProtocol::Jmap | MailProtocol::Proton => false,
             };
 
             tx.execute(

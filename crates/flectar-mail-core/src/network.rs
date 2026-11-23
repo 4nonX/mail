@@ -370,6 +370,14 @@ fn incoming_server(config: &AccountConfig) -> Option<(&'static str, String, u16)
             ))
         }
         MailProtocol::Gmail => Some(("https", "gmail.googleapis.com".into(), 443)),
+        MailProtocol::Proton => {
+            let url = url::Url::parse(crate::proton::api::API_BASE).ok()?;
+            Some((
+                "https",
+                url.host_str()?.to_owned(),
+                url.port_or_known_default()?,
+            ))
+        }
         MailProtocol::Local => None,
     }
 }

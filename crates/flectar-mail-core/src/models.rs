@@ -60,6 +60,9 @@ pub enum MailProtocol {
     /// only on this device. There is at most one such account, and it has no
     /// address, sign-in, or settings, so it never sends.
     Local,
+    /// Proton Mail's REST API. Mail is end-to-end encrypted, so messages are
+    /// decrypted on this device with the account's keys.
+    Proton,
 }
 
 impl MailProtocol {
@@ -70,6 +73,7 @@ impl MailProtocol {
             Self::Jmap => "jmap",
             Self::Pop3 => "pop3",
             Self::Local => "local",
+            Self::Proton => "proton",
         }
     }
 
@@ -80,17 +84,19 @@ impl MailProtocol {
             "jmap" => Some(Self::Jmap),
             "pop3" => Some(Self::Pop3),
             "local" => Some(Self::Local),
+            "proton" => Some(Self::Proton),
             _ => None,
         }
     }
 
     /// Whether one message can belong to several mailboxes at once (Gmail
     /// labels, JMAP `mailboxIds`). Single-folder protocols store location in
-    /// `messages.folder_id` alone.
+    /// `messages.folder_id` alone. Proton files a message in exactly one
+    /// folder; its labels are kept beside that.
     pub const fn has_multi_mailbox_messages(self) -> bool {
         match self {
             Self::Gmail | Self::Jmap => true,
-            Self::Imap | Self::Pop3 | Self::Local => false,
+            Self::Imap | Self::Pop3 | Self::Local | Self::Proton => false,
         }
     }
 }
@@ -1042,7 +1048,7 @@ impl AccountConfig {
     pub fn sends_mail(&self) -> bool {
         match self.mail_protocol {
             MailProtocol::Imap | MailProtocol::Pop3 => !self.smtp_host.is_empty(),
-            MailProtocol::Gmail | MailProtocol::Jmap => true,
+            MailProtocol::Gmail | MailProtocol::Jmap | MailProtocol::Proton => true,
             MailProtocol::Local => false,
         }
     }
@@ -4130,6 +4136,7 @@ mod tests {
             MailProtocol::Jmap,
             MailProtocol::Pop3,
             MailProtocol::Local,
+            MailProtocol::Proton,
         ] {
             assert_eq!(MailProtocol::parse(protocol.as_str()), Some(protocol));
         }

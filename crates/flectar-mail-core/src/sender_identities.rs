@@ -96,6 +96,14 @@ impl Core {
             }
             // SMTP servers publish no identity list.
             MailProtocol::Imap | MailProtocol::Pop3 => vec![primary_identity(&account)],
+            // The addresses the account may send from.
+            MailProtocol::Proton => {
+                let connected =
+                    crate::proton::sync::Link::for_account(&self.sync_ctx(), account.id)
+                        .get(account.proxy_owner())
+                        .await?;
+                crate::proton::sync::sender_identities(&account, &connected.addresses)
+            }
             // It has no address to send from.
             MailProtocol::Local => Vec::new(),
         };
@@ -383,7 +391,7 @@ impl Core {
     }
 }
 
-fn primary_identity(account: &AccountConfig) -> SenderIdentity {
+pub(crate) fn primary_identity(account: &AccountConfig) -> SenderIdentity {
     SenderIdentity {
         account_id: account.id,
         email: account.email.clone(),
@@ -448,7 +456,10 @@ pub fn manual_identity_policy(account: &AccountConfig) -> ManualIdentityPolicy {
 
 pub(crate) fn manual_identity_policy_for(protocol: MailProtocol) -> ManualIdentityPolicy {
     match protocol {
-        MailProtocol::Gmail | MailProtocol::Local => ManualIdentityPolicy::Never,
+        // Proton only sends from the addresses the account has there.
+        MailProtocol::Gmail | MailProtocol::Local | MailProtocol::Proton => {
+            ManualIdentityPolicy::Never
+        }
         MailProtocol::Jmap => ManualIdentityPolicy::WithinWildcard,
         MailProtocol::Imap | MailProtocol::Pop3 => ManualIdentityPolicy::Any,
     }

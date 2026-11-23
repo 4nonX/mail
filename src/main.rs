@@ -85,6 +85,7 @@ mod automatic_copies;
 pub use app_language::AppLanguage;
 mod number_format;
 mod privacy_consent;
+mod proton_sign_in;
 pub use privacy_consent::PrivacyConsent;
 mod oauth_browser;
 pub mod pdf_preview;
@@ -6694,6 +6695,13 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
     let state_for_account = Rc::clone(&state);
     let runtime_for_account = runtime.clone();
     let ui_task_tx_for_account = ui_task_tx.clone();
+    let proton_setup = proton_sign_in::ProtonSetup::register(
+        &app,
+        &state,
+        &runtime,
+        &ui_task_tx,
+        platform.external_urls.clone(),
+    );
     oauth_browser::register(
         &app,
         platform.oauth_redirects.clone(),
@@ -6713,7 +6721,13 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
             match MailProtocol::parse(app.get_account_protocol().as_str()) {
                 Some(MailProtocol::Imap) => (MailProtocol::Imap, "993"),
                 Some(MailProtocol::Pop3) => (MailProtocol::Pop3, "995"),
-                Some(MailProtocol::Gmail | MailProtocol::Jmap | MailProtocol::Local) | None => {
+                Some(
+                    MailProtocol::Gmail
+                    | MailProtocol::Jmap
+                    | MailProtocol::Local
+                    | MailProtocol::Proton,
+                )
+                | None => {
                     return;
                 }
             };
@@ -6793,6 +6807,20 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
             if app.get_account_setup_in_progress() {
                 return;
             }
+            // Proton signs in through its own steps, and for an account that
+            // is here already this signs it in again.
+            if protocol.as_str() == "proton" {
+                let Some(core) = state_for_account.borrow().core.clone() else {
+                    app.set_sync_status(UiMessage::plain(
+                        "Local mail data is unavailable. Retry startup.",
+                    ));
+                    return;
+                };
+                let name = username.trim();
+                let name = if name.is_empty() { email.trim() } else { name };
+                proton_setup.start(&app, core, name.to_owned(), password.to_string());
+                return;
+            }
             let unsupported = || {
                 app.set_sync_status(UiMessage::plain(
                     "Choose a supported account type and connection security.",
@@ -6861,7 +6889,8 @@ pub fn run(platform: PlatformContext) -> Result<(), Box<dyn std::error::Error>> 
                         },
                     )
                 }
-                MailProtocol::Gmail | MailProtocol::Local => {
+                // Proton accounts sign in through their own form.
+                MailProtocol::Gmail | MailProtocol::Local | MailProtocol::Proton => {
                     unsupported();
                     return;
                 }

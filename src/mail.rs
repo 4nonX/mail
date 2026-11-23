@@ -3072,6 +3072,40 @@ impl CoreMailSource {
             .map_err(|error| error.to_string())
     }
 
+    /// The steps of a Proton sign-in, each answering with what Proton asks
+    /// for next.
+    pub async fn proton_sign_in(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> flectar_mail_core::error::Result<flectar_mail_core::proton::setup::ProtonSignIn> {
+        self.core.proton_sign_in(username, password).await
+    }
+
+    pub async fn proton_sign_in_verified(
+        &self,
+    ) -> flectar_mail_core::error::Result<flectar_mail_core::proton::setup::ProtonSignIn> {
+        self.core.proton_sign_in_verified().await
+    }
+
+    pub async fn proton_sign_in_totp(
+        &self,
+        code: &str,
+    ) -> flectar_mail_core::error::Result<flectar_mail_core::proton::setup::ProtonSignIn> {
+        self.core.proton_sign_in_totp(code).await
+    }
+
+    pub async fn proton_sign_in_mailbox_password(
+        &self,
+        password: &str,
+    ) -> flectar_mail_core::error::Result<flectar_mail_core::proton::setup::ProtonSignIn> {
+        self.core.proton_sign_in_mailbox_password(password).await
+    }
+
+    pub async fn proton_sign_in_cancel(&self) {
+        self.core.proton_sign_in_cancel().await;
+    }
+
     pub async fn add_password_account(
         &self,
         args: AddPasswordAccountArgs,

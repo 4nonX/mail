@@ -382,6 +382,7 @@ impl crate::Core {
                 MailProtocol::Pop3 | MailProtocol::Local => {
                     return Err(CoreError::NotFound("the message's original".into()));
                 }
+                MailProtocol::Proton => self.fetch_from_proton(source).await?,
             },
         };
         if raw.len() > crate::MAX_CACHED_MESSAGE_BYTES {
@@ -464,6 +465,20 @@ impl crate::Core {
         .await
     }
 
+    async fn fetch_from_proton(&self, source: &Source) -> Result<Vec<u8>> {
+        let proton_id = source
+            .proton_id
+            .clone()
+            .ok_or_else(|| CoreError::NotFound("the message on the server".into()))?;
+        let config = self.folder_account_config(source.account_id).await?;
+        let connected = crate::proton::sync::Link::for_account(&self.sync_ctx(), config.id)
+            .get(config.proxy_owner())
+            .await?;
+        crate::proton::sync::download(&connected, &proton_id)
+            .await
+            .map(|(_, raw)| raw)
+    }
+
     async fn fetch_from_jmap(&self, run: &mut Run, source: &Source) -> Result<Vec<u8>> {
         let blob_id = source
             .jmap_blob_id
@@ -537,7 +552,10 @@ impl crate::Core {
                     transfer.received_at,
                 )
                 .await?),
-            MailProtocol::Imap | MailProtocol::Jmap | MailProtocol::Gmail => {
+            MailProtocol::Imap
+            | MailProtocol::Jmap
+            | MailProtocol::Gmail
+            | MailProtocol::Proton => {
                 match self
                     .upload_to_folder(
                         &mut run.uploads,
@@ -577,7 +595,7 @@ impl crate::Core {
             return Ok(());
         };
         match source.protocol {
-            MailProtocol::Imap | MailProtocol::Jmap => {
+            MailProtocol::Imap | MailProtocol::Jmap | MailProtocol::Proton => {
                 let account_id = source.account_id;
                 let queued = self
                     .db
@@ -697,6 +715,7 @@ struct Source {
     is_outgoing: bool,
     jmap_blob_id: Option<String>,
     gm_msgid: Option<String>,
+    proton_id: Option<String>,
 }
 
 impl Source {
@@ -704,7 +723,8 @@ impl Source {
         Ok(conn
             .query_row(
                 "SELECT m.account_id, a.mail_protocol, m.folder_id, m.uid, m.message_id,
-                        m.size, m.raw_path, m.is_outgoing, m.jmap_blob_id, m.gm_msgid
+                        m.size, m.raw_path, m.is_outgoing, m.jmap_blob_id, m.gm_msgid,
+                        m.proton_id
                  FROM messages m JOIN accounts a ON a.id = m.account_id
                  WHERE m.id = ?1",
                 params![message_id],
@@ -720,6 +740,7 @@ impl Source {
                         is_outgoing: row.get::<_, i64>(7)? != 0,
                         jmap_blob_id: row.get(8)?,
                         gm_msgid: row.get(9)?,
+                        proton_id: row.get(10)?,
                     })
                 },
             )

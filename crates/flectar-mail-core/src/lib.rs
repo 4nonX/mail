@@ -339,6 +339,7 @@ pub(crate) fn validate_portable_account(config: &PortableAccountConfig) -> Resul
         MailProtocol::Jmap | MailProtocol::Pop3 => {
             account_kind == (Provider::Generic, AuthKind::Password)
         }
+        MailProtocol::Proton => account_kind == (Provider::Generic, AuthKind::Password),
         // Mail kept on this device has no server to sign in to again.
         MailProtocol::Local => false,
     };
@@ -373,7 +374,7 @@ pub(crate) fn validate_portable_account(config: &PortableAccountConfig) -> Resul
                 && config.incoming_port != 0
                 && (config.smtp_host.trim().is_empty() || config.smtp_port != 0)
         }
-        MailProtocol::Jmap => !config.username.trim().is_empty(),
+        MailProtocol::Jmap | MailProtocol::Proton => !config.username.trim().is_empty(),
         MailProtocol::Local => false,
     };
     if !complete {
@@ -385,12 +386,12 @@ pub(crate) fn validate_portable_account(config: &PortableAccountConfig) -> Resul
     Ok(())
 }
 
-/// Separator between the levels of a stored folder path. JMAP paths are
-/// composed by Flectar from mailbox names; IMAP servers and Gmail labels
+/// Separator between the levels of a stored folder path. JMAP and Proton
+/// paths are composed by Flectar from folder names; IMAP servers and Gmail labels
 /// report their own, and POP3 and local folders exist only on this device.
 fn folder_path_delimiter(protocol: MailProtocol, folder: &repo::folders::Folder) -> String {
     match protocol {
-        MailProtocol::Jmap => " / ".to_owned(),
+        MailProtocol::Jmap | MailProtocol::Proton => " / ".to_owned(),
         MailProtocol::Gmail | MailProtocol::Imap => {
             folder.delimiter.clone().unwrap_or_else(|| "/".into())
         }
@@ -478,6 +479,12 @@ fn folder_exists() -> CoreError {
 /// Gmail mail is only reachable through Google sign-in.
 fn gmail_needs_google_sign_in() -> CoreError {
     CoreError::Auth("Gmail accounts sign in with Google, not with a password".into())
+}
+
+/// Proton proves the password without sending it and may ask for more, so
+/// its accounts are never added or checked as password accounts.
+fn proton_has_its_own_sign_in() -> CoreError {
+    CoreError::Auth("Proton accounts sign in through Proton's own sign-in".into())
 }
 
 fn local_mail_has_no_server() -> CoreError {
@@ -1840,7 +1847,7 @@ impl Core {
                             rusqlite::params![account_id],
                         )?;
                     }
-                    MailProtocol::Imap => {
+                    MailProtocol::Imap | MailProtocol::Proton => {
                         repo::folders::reopen_backfill_for_account(&transaction, account_id)?;
                     }
                     // The next sync weighs skipped server messages against
@@ -1915,7 +1922,10 @@ impl Core {
                 let mut config = repo::accounts::get_config(&tx, account_id)?
                     .ok_or_else(|| CoreError::NotFound(format!("account {account_id}")))?;
                 match config.mail_protocol {
-                    MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Jmap => {}
+                    MailProtocol::Gmail
+                    | MailProtocol::Imap
+                    | MailProtocol::Jmap
+                    | MailProtocol::Proton => {}
                     MailProtocol::Pop3 => {
                         return Err(CoreError::Other(
                             "POP3 accounts keep sent mail on this device".into(),
@@ -1958,7 +1968,8 @@ impl Core {
                     MailProtocol::Gmail
                     | MailProtocol::Jmap
                     | MailProtocol::Pop3
-                    | MailProtocol::Local => {
+                    | MailProtocol::Local
+                    | MailProtocol::Proton => {
                         return Err(CoreError::Other(
                             "only IMAP accounts have folder subscriptions".into(),
                         ));
@@ -2297,7 +2308,8 @@ impl Core {
                     MailProtocol::Gmail
                     | MailProtocol::Imap
                     | MailProtocol::Jmap
-                    | MailProtocol::Local => {
+                    | MailProtocol::Local
+                    | MailProtocol::Proton => {
                         return Err(CoreError::Other(
                             "only POP3 accounts remove downloaded mail from their server".into(),
                         ));
@@ -2341,6 +2353,7 @@ impl Core {
                 .map_err(|error| error.to_string()),
             MailProtocol::Gmail => Err(gmail_needs_google_sign_in().to_string()),
             MailProtocol::Local => Err(local_mail_has_no_server().to_string()),
+            MailProtocol::Proton => Err(proton_has_its_own_sign_in().to_string()),
         };
         match result {
             Ok(()) => ConnectionTestResult {
@@ -2483,6 +2496,7 @@ impl Core {
             }
             MailProtocol::Gmail => return Err(gmail_needs_google_sign_in()),
             MailProtocol::Local => return Err(local_mail_has_no_server()),
+            MailProtocol::Proton => return Err(proton_has_its_own_sign_in()),
         }
 
         credentials::check_available_async(self.credentials.clone()).await?;
@@ -2593,6 +2607,7 @@ impl Core {
             }
             MailProtocol::Gmail => return Err(gmail_needs_google_sign_in()),
             MailProtocol::Local => return Err(local_mail_has_no_server()),
+            MailProtocol::Proton => return Err(proton_has_its_own_sign_in()),
         };
         let is_new_account = existing.is_none();
 
@@ -3311,6 +3326,9 @@ impl Core {
             .db
             .read(move |conn| repo::accounts::protocol(conn, account_id))
             .await?;
+        if protocol == Some(MailProtocol::Proton) {
+            self.proton_sign_out(account_id).await;
+        }
         if protocol != Some(MailProtocol::Local) {
             credentials::delete_all_async(self.credentials.clone(), account_id).await?;
         }
@@ -3708,7 +3726,10 @@ impl Core {
     ) -> Result<MailExport> {
         match self.account_protocol(account_id).await? {
             MailProtocol::Pop3 | MailProtocol::Local => {}
-            MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Jmap => {
+            MailProtocol::Gmail
+            | MailProtocol::Imap
+            | MailProtocol::Jmap
+            | MailProtocol::Proton => {
                 return Err(CoreError::Other(
                     "only POP3 accounts and mail kept on this device are here alone".into(),
                 ));
@@ -5363,6 +5384,11 @@ impl Core {
                     })
                     .await?
             }
+            MailProtocol::Proton => {
+                let config = self.folder_account_config(account_id).await?;
+                crate::proton::folders::create(&self.sync_ctx(), &config, parent.as_ref(), &name)
+                    .await?
+            }
             MailProtocol::Pop3 | MailProtocol::Local => {
                 let delimiter = repo::folders::DEVICE_DELIMITER;
                 if name.contains(delimiter) {
@@ -5525,6 +5551,20 @@ impl Core {
                     })
                     .await?;
             }
+            MailProtocol::Proton => {
+                let config = self.folder_account_config(account_id).await?;
+                crate::proton::folders::rename(&self.sync_ctx(), &config, folder.id, &name).await?;
+                let new_name = parent_prefix
+                    .map(|parent| format!("{parent}{delimiter}{name}"))
+                    .unwrap_or(name);
+                self.db
+                    .write(move |conn| {
+                        repo::folders::rename_tree(
+                            conn, account_id, &old_name, &new_name, &delimiter,
+                        )
+                    })
+                    .await?;
+            }
             MailProtocol::Pop3 | MailProtocol::Local => {
                 let new_name = parent_prefix
                     .map(|parent| format!("{parent}{delimiter}{name}"))
@@ -5628,6 +5668,21 @@ impl Core {
                 .await?;
                 sync::delete_folder_tree(&self.sync_ctx(), account_id, folder.path, delimiter)
                     .await?;
+            }
+            MailProtocol::Proton => {
+                let config = self.folder_account_config(account_id).await?;
+                crate::proton::folders::delete(
+                    &self.sync_ctx(),
+                    &config,
+                    tree.iter().map(|candidate| candidate.id).collect(),
+                )
+                .await?;
+                sync::delete_folder_tree(&self.sync_ctx(), account_id, folder.path, delimiter)
+                    .await?;
+                // The mail that was in it is in no folder on Proton now,
+                // which the next sync shows.
+                self.nudge(Some(account_id), || SyncCmd::SyncNow { complete: None })
+                    .await;
             }
             // The folders and their mail exist only here.
             MailProtocol::Pop3 | MailProtocol::Local => {
@@ -6925,7 +6980,7 @@ impl Core {
                 // Protected drafts stay local until explicit Send. Even incomplete
                 // recipient lists must never cause a plaintext server upload.
                 let uploads_drafts = match mail_protocol {
-                    MailProtocol::Gmail | MailProtocol::Jmap => true,
+                    MailProtocol::Gmail | MailProtocol::Jmap | MailProtocol::Proton => true,
                     MailProtocol::Imap | MailProtocol::Pop3 | MailProtocol::Local => false,
                 };
                 let sync_remote_account = if !security.enabled() && uploads_drafts {
@@ -7120,7 +7175,7 @@ impl Core {
                     .query_row(
                         "SELECT m.account_id, m.thread_id, m.folder_id, m.uid, m.is_draft,
                                 COALESCE(f.role, ''), m.gm_msgid, m.gmail_draft_id,
-                                a.mail_protocol, m.jmap_id
+                                a.mail_protocol, m.jmap_id, m.proton_id
                          FROM messages m LEFT JOIN folders f ON f.id = m.folder_id
                          JOIN accounts a ON a.id = m.account_id
                          WHERE m.id = ?1",
@@ -7137,6 +7192,7 @@ impl Core {
                                 row.get::<_, Option<String>>(7)?,
                                 row.get::<_, MailProtocol>(8)?,
                                 row.get::<_, Option<String>>(9)?,
+                                row.get::<_, Option<String>>(10)?,
                             ))
                         },
                     )
@@ -7240,6 +7296,29 @@ impl Core {
                             None,
                         )?;
                         nudge_account = Some(row.0);
+                    }
+                    MailProtocol::Proton => {
+                        conn.execute(
+                            "UPDATE pending_actions SET state='cancelled',finished_at=?2
+                             WHERE message_id=?1 AND kind='save_draft'
+                               AND state IN ('pending','inflight')",
+                            rusqlite::params![draft_id, now_ms()],
+                        )?;
+                        // Proton's copy goes too, once it has one.
+                        if let Some(remote_id) = row.10.as_deref() {
+                            repo::actions::enqueue(
+                                conn,
+                                row.0,
+                                "delete_draft",
+                                None,
+                                row.1,
+                                &serde_json::json!({ "protonId": remote_id }),
+                                None,
+                            )?;
+                            nudge_account = Some(row.0);
+                        }
+                        staged_paths = repo::messages::take_draft_attachment_paths(conn, draft_id)?;
+                        repo::messages::delete(conn, draft_id)?;
                     }
                     MailProtocol::Imap | MailProtocol::Pop3 | MailProtocol::Local => {
                         // Purely local drafts have no remote copy to preserve.
@@ -7370,7 +7449,10 @@ impl Core {
             }
             _ => None,
         };
-        let uploads_drafts = matches!(protocol, MailProtocol::Gmail | MailProtocol::Jmap);
+        let uploads_drafts = matches!(
+            protocol,
+            MailProtocol::Gmail | MailProtocol::Jmap | MailProtocol::Proton
+        );
         let settings = self.db.read(|conn| repo::settings::get(conn)).await?;
         let dispatch_at = args
             .send_at
@@ -7550,7 +7632,8 @@ impl Core {
             | MailProtocol::Gmail
             | MailProtocol::Imap
             | MailProtocol::Jmap
-            | MailProtocol::Local => {
+            | MailProtocol::Local
+            | MailProtocol::Proton => {
                 return Err(error);
             }
         }

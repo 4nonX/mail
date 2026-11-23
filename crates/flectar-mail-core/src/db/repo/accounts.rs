@@ -187,7 +187,9 @@ pub fn insert_with_sync_state(
     // the UI must not offer a mutation the server may reject. Other
     // protocols validate the operation when it is attempted.
     let can_create_top_level_mailbox = match a.mail_protocol {
-        MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Pop3 => true,
+        MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Pop3 | MailProtocol::Proton => {
+            true
+        }
         MailProtocol::Jmap => false,
         MailProtocol::Local => {
             return Err(crate::error::CoreError::Other(
@@ -234,7 +236,7 @@ pub fn insert_with_sync_state(
     match a.mail_protocol {
         MailProtocol::Pop3 => super::pop3::create_account_state(conn, account_id)?,
         // Folders come from the server.
-        MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Jmap => {}
+        MailProtocol::Gmail | MailProtocol::Imap | MailProtocol::Jmap | MailProtocol::Proton => {}
         MailProtocol::Local => unreachable!("refused above"),
     }
     Ok(account_id)

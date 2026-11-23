@@ -324,6 +324,93 @@ fn jmap_part(expr: &Expr, mailboxes: &HashMap<&str, String>, widening: bool) -> 
     }
 }
 
+/// `tree` as the parameters of Proton's message listing, or nothing when
+/// Proton can't answer it. Proton keeps mail encrypted, so it finds what it
+/// lists about a message (who, when, the subject, where it is) and can't
+/// look inside one, nor take alternatives or exclusions.
+pub(crate) fn proton(tree: &Expr, folders: &HashMap<String, String>) -> Option<String> {
+    #[derive(Default)]
+    struct Query {
+        keyword: Vec<String>,
+        subject: Vec<String>,
+        fields: Vec<(&'static str, String)>,
+        label: Option<String>,
+    }
+    fn label(query: &mut Query, id: String) -> Option<()> {
+        match &query.label {
+            Some(existing) if *existing != id => None,
+            _ => {
+                query.label = Some(id);
+                Some(())
+            }
+        }
+    }
+    fn part(expr: &Expr, folders: &HashMap<String, String>, query: &mut Query) -> Option<()> {
+        match expr {
+            Expr::Text(Text { words, column, .. }) => match column {
+                Some("body") => return None,
+                Some("subject") => query.subject.push(words.clone()),
+                _ => query.keyword.push(words.clone()),
+            },
+            Expr::Filter(filter) => match filter {
+                Filter::From(from) => query.fields.push(("From", from.clone())),
+                Filter::To(to) => query.fields.push(("To", to.clone())),
+                Filter::In(role) => label(query, folders.get(*role)?.clone())?,
+                // Proton's "all mail".
+                Filter::Anywhere => label(query, "5".into())?,
+                Filter::Unread => query.fields.push(("Unread", "1".into())),
+                // The star is a label of Proton's.
+                Filter::Starred => label(query, "10".into())?,
+                Filter::HasAttachment => query.fields.push(("Attachments", "1".into())),
+                Filter::Before(at) => query.fields.push(("End", at.div_euclid(1000).to_string())),
+                Filter::After(at) => {
+                    query
+                        .fields
+                        .push(("Begin", at.div_euclid(1000).to_string()));
+                }
+                Filter::Larger(_) | Filter::Smaller(_) | Filter::Filename(_) => return None,
+            },
+            Expr::Not(_) | Expr::Or(_) => return None,
+            Expr::And(parts) => {
+                for inner in parts {
+                    part(inner, folders, query)?;
+                }
+            }
+        }
+        Some(())
+    }
+    let mut query = Query::default();
+    part(tree, folders, &mut query)?;
+    if !query.keyword.is_empty() {
+        query.fields.push(("Keyword", query.keyword.join(" ")));
+    }
+    if !query.subject.is_empty() {
+        query.fields.push(("Subject", query.subject.join(" ")));
+    }
+    // Without a folder, everything but Trash and Spam: Proton's "almost all
+    // mail".
+    query.fields.push((
+        "LabelID",
+        query.label.clone().unwrap_or_else(|| "15".into()),
+    ));
+    Some(
+        query
+            .fields
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "{name}={}",
+                    percent_encoding::utf8_percent_encode(
+                        value,
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("&"),
+    )
+}
+
 /// `tree` in Gmail's search syntax, with times in seconds since the epoch so
 /// Gmail doesn't read days in its own time zone.
 pub(crate) fn gmail(tree: &Expr) -> String {
@@ -427,6 +514,41 @@ mod tests {
             ImapSearch::Criteria { criteria, .. } => criteria,
             ImapSearch::Nothing => panic!("{query} searches for nothing"),
         }
+    }
+
+    fn proton_query(query: &str) -> Option<String> {
+        let folders = HashMap::from([
+            ("inbox".to_owned(), "0".to_owned()),
+            ("trash".to_owned(), "3".to_owned()),
+        ]);
+        proton(&tree(query), &folders)
+    }
+
+    #[test]
+    fn proton_is_asked_what_it_can_find_without_reading_mail() {
+        assert_eq!(
+            proton_query("invoice march").as_deref(),
+            Some("Keyword=invoice%20march&LabelID=15")
+        );
+        assert_eq!(
+            proton_query("from:ada@example.com subject:plan is:unread in:inbox").as_deref(),
+            Some("From=ada%40example%2Ecom&Unread=1&Subject=plan&LabelID=0")
+        );
+        assert_eq!(
+            proton_query("is:starred has:attachment").as_deref(),
+            Some("Attachments=1&LabelID=10")
+        );
+        assert_eq!(
+            proton_query("in:anywhere report").as_deref(),
+            Some("Keyword=report&LabelID=5")
+        );
+        // Proton can't look inside a message, weigh alternatives or leave
+        // things out, nor find one place that is two.
+        assert_eq!(proton_query("body:secret"), None);
+        assert_eq!(proton_query("a OR b"), None);
+        assert_eq!(proton_query("-from:ada@example.com"), None);
+        assert_eq!(proton_query("is:starred in:trash"), None);
+        assert_eq!(proton_query("larger:5M"), None);
     }
 
     #[test]

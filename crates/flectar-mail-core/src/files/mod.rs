@@ -293,7 +293,10 @@ impl Core {
             .into_iter()
             .find(|a| a.id == account)
             .ok_or_else(|| err("Account was removed."))?;
-        if config.auth_kind != AuthKind::Password {
+        // A Proton account signs in with a password that is never kept.
+        if config.auth_kind != AuthKind::Password
+            || config.mail_protocol == crate::models::MailProtocol::Proton
+        {
             return Err(err(
                 "Connect storage using a Stalwart password or application-password account.",
             ));
