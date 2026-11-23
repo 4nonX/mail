@@ -171,6 +171,44 @@ pub enum MailHistory {
     All,
 }
 
+/// What an account downloads ahead of time within its mail history (#253).
+/// Anything not downloaded comes from the server when it's opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DownloadPolicy {
+    /// Headers alone: messages download when they're opened.
+    Headers,
+    /// Headers and messages, with attachments when they're opened.
+    #[default]
+    Messages,
+    /// Messages and their attachments, up to
+    /// [`DownloadPolicy::LARGEST_ATTACHMENT`] each, to open offline.
+    Everything,
+}
+
+impl DownloadPolicy {
+    /// Attachments larger than this download when they're opened, as their
+    /// provider's sending limits are often about this size.
+    pub const LARGEST_ATTACHMENT: i64 = 25 * 1024 * 1024;
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Headers => "headers",
+            Self::Messages => "messages",
+            Self::Everything => "everything",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "headers" => Some(Self::Headers),
+            "messages" => Some(Self::Messages),
+            "everything" => Some(Self::Everything),
+            _ => None,
+        }
+    }
+}
+
 impl MailHistory {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -510,6 +548,11 @@ pub struct AccountSettings {
     // value never triggers an unbounded mailbox download.
     #[serde(default = "default_mail_history")]
     pub mail_history: MailHistory,
+    /// What this device downloads ahead of time within the mail history
+    /// (#253). Each device keeps its own, as it goes with the device's
+    /// storage and network.
+    #[serde(default)]
+    pub download: DownloadPolicy,
     #[serde(default)]
     pub security: crate::mail_security::MailSecurity,
     pub connection: MailConnectionSettings,
@@ -577,6 +620,7 @@ impl AccountSettings {
     pub fn new(connection: MailConnectionSettings) -> Self {
         Self {
             mail_history: default_mail_history(),
+            download: DownloadPolicy::default(),
             security: Default::default(),
             connection,
             default_sender_email: None,
@@ -765,6 +809,29 @@ mod account_settings_tests {
         assert_eq!(restored, settings);
     }
 
+    /// An account downloads messages ahead of time unless it's set otherwise,
+    /// and the choice survives storage (#253).
+    #[test]
+    fn what_an_account_downloads_starts_at_messages_and_is_kept() {
+        let mut settings: AccountSettings = serde_json::from_str(MINIMAL_SETTINGS).unwrap();
+        assert_eq!(settings.download, DownloadPolicy::Messages);
+        for download in [
+            DownloadPolicy::Headers,
+            DownloadPolicy::Messages,
+            DownloadPolicy::Everything,
+        ] {
+            settings.download = download;
+            let restored: AccountSettings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(restored.download, download);
+            assert_eq!(
+                DownloadPolicy::from_storage(download.as_str()),
+                Some(download)
+            );
+        }
+        assert_eq!(DownloadPolicy::from_storage("bodies"), None);
+    }
+
     #[test]
     fn subscribed_folders_only_starts_off_and_survives_serialization() {
         let mut settings: AccountSettings = serde_json::from_str(MINIMAL_SETTINGS).unwrap();
@@ -856,7 +923,13 @@ mod account_settings_tests {
 pub struct Account {
     pub id: i64,
     pub email: String,
+    /// The owner's name, as the account's provider gave it when the account
+    /// signed in with it.
     pub display_name: Option<String>,
+    /// The name the user gave the account, such as "Work". Lists of accounts
+    /// show it instead of the address; people it writes to never see it.
+    #[serde(default)]
+    pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub provider: Provider,
     pub auth_kind: AuthKind,
@@ -883,6 +956,39 @@ pub struct Account {
     pub caught_up_at: Option<i64>,
 }
 
+impl Account {
+    /// What lists of accounts call it: the name the user gave it, else the
+    /// provider's name for its owner, else its address.
+    pub fn label(&self) -> &str {
+        account_label(
+            self.name.as_deref(),
+            self.display_name.as_deref(),
+            &self.email,
+        )
+    }
+}
+
+/// The name of an account in lists of accounts: `name`, else
+/// `display_name`, else `email`, skipping blank names.
+pub fn account_label<'a>(
+    name: Option<&'a str>,
+    display_name: Option<&'a str>,
+    email: &'a str,
+) -> &'a str {
+    [name, display_name]
+        .into_iter()
+        .flatten()
+        .find(|name| !name.trim().is_empty())
+        .unwrap_or(email)
+}
+
+/// A name the user typed for an account, as stored: on one line, without
+/// surrounding spaces. Blank means no name.
+pub fn clean_account_name(name: &str) -> Option<String> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then_some(name)
+}
+
 /// Mail imported into folders that exist only on this device. It belongs to
 /// an account of protocol [`MailProtocol::Local`], which account lists leave
 /// out.
@@ -901,6 +1007,8 @@ pub struct AccountConfig {
     pub id: i64,
     pub email: String,
     pub display_name: Option<String>,
+    /// See [`Account::name`].
+    pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub provider: Provider,
     pub auth_kind: AuthKind,
@@ -957,6 +1065,9 @@ impl AccountConfig {
 pub struct PortableAccountConfig {
     pub email: String,
     pub display_name: Option<String>,
+    /// See [`Account::name`].
+    #[serde(default)]
+    pub name: Option<String>,
     pub provider: Provider,
     pub auth_kind: AuthKind,
     pub mail_protocol: MailProtocol,
@@ -975,6 +1086,7 @@ impl From<&AccountConfig> for PortableAccountConfig {
         Self {
             email: config.email.clone(),
             display_name: config.display_name.clone(),
+            name: config.name.clone(),
             provider: config.provider,
             auth_kind: config.auth_kind,
             mail_protocol: config.mail_protocol,
@@ -3283,10 +3395,6 @@ pub struct Settings {
     /// Missing = the UI derives a stable hue from the address.
     #[serde(default)]
     pub account_colors: std::collections::HashMap<String, String>,
-    /// Short name shown on inbox rows, keyed by stringified account id.
-    /// Missing = display name, else the address local part.
-    #[serde(default)]
-    pub account_short_names: std::collections::HashMap<String, String>,
     /// Optional local groups such as Personal and Work. An account may belong
     /// to at most one profile; provider state is never affected.
     #[serde(default)]
@@ -3609,7 +3717,6 @@ impl Default for Settings {
             show_account_badges: false,
             sync_sign_ins: true,
             account_colors: std::collections::HashMap::new(),
-            account_short_names: std::collections::HashMap::new(),
             mail_profiles: Vec::new(),
             saved_searches: Vec::new(),
             active_mail_profile: None,
@@ -3949,6 +4056,37 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accounts_are_listed_by_their_name_then_their_owner_then_their_address() {
+        assert_eq!(
+            account_label(Some("Shop"), Some("Ada Lovelace"), "ada@example.com"),
+            "Shop"
+        );
+        assert_eq!(
+            account_label(None, Some("Ada Lovelace"), "ada@example.com"),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            account_label(Some("  "), Some(""), "ada@example.com"),
+            "ada@example.com"
+        );
+        assert_eq!(
+            account_label(None, None, "ada@example.com"),
+            "ada@example.com"
+        );
+    }
+
+    #[test]
+    fn typed_account_names_are_kept_on_one_line() {
+        assert_eq!(clean_account_name("  Office  ").as_deref(), Some("Office"));
+        assert_eq!(
+            clean_account_name("Corner\n shop\t2").as_deref(),
+            Some("Corner shop 2")
+        );
+        assert_eq!(clean_account_name(" \n "), None);
+        assert_eq!(clean_account_name(""), None);
+    }
 
     #[test]
     fn action_kind_string_roundtrip() {
