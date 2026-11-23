@@ -85,7 +85,9 @@ who get the message as PGP/MIME.
   user keys.
 - `hv.rs` – Proton's CAPTCHA solved in the user's browser: a loopback server
   frames `/core/v4/captcha` from its own origin, passes Proton's requests
-  through without the framing headers, and takes the `pm_captcha` token. It
+  through without the framing headers, and takes the `pm_captcha` token.
+  The requests go to `mail-api.proton.me`, whose root also holds the puzzle
+  under `/captcha/v1/`; `mail.proton.me/api` does not pass that on. It
   only answers its own `Host`, only takes the token from its own `Origin`,
   and stops after one token or ten minutes.
 - `keys.rs` – user, salts and addresses; user keys unlocked with the

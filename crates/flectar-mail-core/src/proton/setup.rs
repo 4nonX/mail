@@ -212,8 +212,12 @@ impl crate::Core {
                             .into(),
                     ));
                 }
-                let captcha =
-                    hv::start(Owner::App, current.session.base(), &challenge.token).await?;
+                let captcha = hv::start(
+                    Owner::App,
+                    api::captcha_origin(current.session.base()),
+                    &challenge.token,
+                )
+                .await?;
                 let url = captcha.url.clone();
                 current.captcha = Some(captcha);
                 Ok(ProtonSignIn::Captcha { url })

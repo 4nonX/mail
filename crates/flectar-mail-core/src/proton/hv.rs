@@ -252,7 +252,14 @@ async fn pass_through(stream: &mut TcpStream, state: &State, request: &Request) 
         .map_err(|_| CoreError::Network("bad method".into()))?;
     let url = format!("{}{}", state.api_base, request.target);
     let mut upstream = http_client(state.owner)?.request(method, &url);
-    for name in ["content-type", "accept", "accept-language", "cookie"] {
+    // `pcaptcha` carries the solved puzzle to Proton.
+    for name in [
+        "content-type",
+        "accept",
+        "accept-language",
+        "cookie",
+        "pcaptcha",
+    ] {
         if let Some(value) = request.header(name) {
             upstream = upstream.header(name, value);
         }

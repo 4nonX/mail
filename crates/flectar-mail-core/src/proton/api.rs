@@ -15,6 +15,20 @@ use tokio::sync::Mutex;
 
 /// Proton's API for mail accounts.
 pub const API_BASE: &str = "https://mail.proton.me/api";
+/// Where Proton serves its CAPTCHA: the API's own host, whose root holds
+/// both `/core/v4/captcha` and the puzzle under `/captcha/v1/`. The mail
+/// site only passes on what is under its `/api`, which leaves the puzzle out.
+pub const CAPTCHA_ORIGIN: &str = "https://mail-api.proton.me";
+
+/// The origin the CAPTCHA of a session on `base` is served from.
+pub fn captcha_origin(base: &str) -> &str {
+    if base == API_BASE {
+        CAPTCHA_ORIGIN
+    } else {
+        base
+    }
+}
+
 /// The host of [`API_BASE`].
 pub const API_HOST: &str = "mail.proton.me";
 
