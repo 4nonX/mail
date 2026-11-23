@@ -397,8 +397,18 @@ jobs:
         # still use: remove it when both drop it. The last two are chrono,
         # which the app uses for dates throughout, and humantime, which the
         # optional model download pulls in. Remove them when both move to a
-        # maintained crate. These are maintenance notices, not vulnerability
-        # waivers. Deny every other warning and all known vulnerabilities.
+        # maintained crate. Those are maintenance notices, not vulnerability
+        # waivers.
+        #
+        # The last three are waivers: timing side channels in rsa, ml-dsa and
+        # crypto-bigint, which Proton's OpenPGP backend (proton-rpgp, used
+        # for Proton Mail accounts, docs/proton.md) depends on at versions
+        # with no fixed release it accepts. They concern an attacker who can
+        # time many private-key operations, which a mail app decrypting its
+        # own mail on the user's device doesn't offer. Remove each when
+        # proton-rpgp moves to a fixed version.
+        #
+        # Deny every other warning and all known vulnerabilities.
         run: |
           lockfiles="Cargo.lock platform/android/Cargo.lock"
           # Tier 3 ports are audited daily and when their own workflow runs,
@@ -417,5 +427,8 @@ jobs:
               --ignore RUSTSEC-2026-0372 \
               --ignore RUSTSEC-2026-0441 \
               --ignore RUSTSEC-2026-0543 \
-              --ignore RUSTSEC-2026-0542
+              --ignore RUSTSEC-2026-0542 \
+              --ignore RUSTSEC-2023-0071 \
+              --ignore RUSTSEC-2025-0144 \
+              --ignore RUSTSEC-2026-0387
           done
