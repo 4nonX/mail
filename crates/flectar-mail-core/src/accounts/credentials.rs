@@ -70,6 +70,9 @@ pub enum Slot {
     /// The password of an account's SMTP server, when it signs in with its
     /// own username (#252).
     SmtpPassword,
+    /// A Proton account's session tokens and the passphrase that unlocks its
+    /// keys, replaced as one value. The account's password is never kept.
+    ProtonSession,
 }
 
 impl Slot {
@@ -97,6 +100,7 @@ impl Slot {
             Slot::LibreTranslateKey => "libretranslate_key".into(),
             Slot::ProxyPassword => "proxy_password".into(),
             Slot::SmtpPassword => "smtp_password".into(),
+            Slot::ProtonSession => "proton_session".into(),
         }
     }
 }

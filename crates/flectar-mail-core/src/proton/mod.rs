@@ -9,3 +9,4 @@ pub mod auth;
 pub mod hv;
 pub mod keys;
 pub mod mail;
+pub mod stored;

@@ -486,6 +486,7 @@ fn system_delete_all(service: &str, account_id: i64) -> Result<()> {
         Slot::SyncTrial,
         Slot::ProxyPassword,
         Slot::SmtpPassword,
+        Slot::ProtonSession,
     ] {
         system_delete(service, account_id, slot)?;
     }
