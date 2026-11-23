@@ -116,3 +116,13 @@ features = ["derive"]
 
 [dev-dependencies.serde_json]
 version = "1.0.125"
+
+# Vendored as published (patches/proton-kem/README.md). Its `truncate` shares
+# a name with one the standard library may add, which builds that deny
+# warnings in path dependencies would stop at.
+[lints.rust]
+unstable_name_collisions = "allow"
+
+# Used only with features this build leaves off.
+[package.metadata.cargo-machete]
+ignored = ["hex", "serde", "serde_json"]

@@ -176,3 +176,8 @@ unused_qualifications = "warn"
 level = "warn"
 priority = 0
 check-cfg = ["cfg(forcego)"]
+
+# Vendored as published (patches/proton-kem/README.md); named so its version
+# is pinned, not used in code.
+[package.metadata.cargo-machete]
+ignored = ["kem"]

@@ -15,7 +15,10 @@ So the prerelease is vendored under another name:
 | `crates/proton-rpgp` | `proton-rpgp` 0.9.0 from crates.io | depends on `kem-pre` under the name `kem` |
 
 No source file changed; only the `[dependencies.kem]` entry of the two
-manifests gained `package = "kem-pre"` and a `path`. The root manifest
+manifests gained `package = "kem-pre"` and a `path`. Each manifest also
+names the dependencies it doesn't use in this build for cargo-machete, and
+`ml-kem`'s allows the `unstable_name_collisions` warning its code raises,
+which the Android lint would otherwise stop at. The root manifest
 patches `ml-kem` and `proton-rpgp` to these copies. `ml-kem` 0.3, which
 `hpke` uses, still comes from crates.io, because a patch only replaces the
 version it carries.

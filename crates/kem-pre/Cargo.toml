@@ -63,3 +63,8 @@ version = "0.8"
 
 [dev-dependencies.x3dh-ke]
 version = "0.1"
+
+# Vendored as published (patches/proton-kem/README.md); used only with a
+# feature this build leaves off.
+[package.metadata.cargo-machete]
+ignored = ["zeroize"]
