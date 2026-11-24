@@ -7,7 +7,7 @@
 //! password of an account that has two. What is kept afterwards is the
 //! session and the key passphrase, never a password.
 
-use super::api::{HumanVerificationAnswer, Session};
+use super::api::{ApiResult, Failure, HumanVerification, HumanVerificationAnswer, Session};
 use super::auth::{self, SignedIn, Step};
 use super::hv::{self, Captcha};
 use super::stored::{self, StoredSession};
@@ -36,6 +36,18 @@ pub enum ProtonSignIn {
     Done(Account),
 }
 
+/// Where a sign-in goes on once a CAPTCHA is solved. Proton may ask for one
+/// at the password and at any step after it.
+enum Resume {
+    /// The password is proved again, with the answer.
+    Password,
+    /// The code from the authenticator app is asked for again: the one
+    /// given has run out by the time a CAPTCHA is solved.
+    Totp,
+    /// The keys are unlocked with this password.
+    Finish(String),
+}
+
 /// The sign-in under way. There is one at a time.
 struct Pending {
     /// Tells this sign-in from one started after it.
@@ -44,6 +56,7 @@ struct Pending {
     username: String,
     password: String,
     captcha: Option<Captcha>,
+    resume: Resume,
     signed_in: Option<SignedIn>,
 }
 
@@ -60,6 +73,22 @@ fn security_key_only() -> CoreError {
         "This Proton account signs in with a security key only, which Flectar Mail can't use. Add an authenticator app in Proton's security settings, then sign in again."
             .into(),
     )
+}
+
+/// Proton's challenge, when that is what a request ended in.
+fn challenge_in(failure: &Failure) -> Option<HumanVerification> {
+    match failure {
+        Failure::Api(error) => error.human_verification(),
+        Failure::Core(_) => None,
+    }
+}
+
+/// Derives the key passphrase from `key_password`, checks that it unlocks
+/// the account's keys, and lists the account's addresses.
+async fn unlock(session: &Session, key_password: &str) -> ApiResult<(String, Vec<keys::Address>)> {
+    let passphrase = auth::key_passphrase(session, key_password).await?;
+    let addresses = keys::fetch_addresses(session).await?;
+    Ok((passphrase, addresses))
 }
 
 impl crate::Core {
@@ -85,6 +114,7 @@ impl crate::Core {
             username,
             password: password.to_owned(),
             captcha: None,
+            resume: Resume::Password,
             signed_in: None,
         };
         let step = self.after_password(&mut next, step).await;
@@ -124,16 +154,25 @@ impl crate::Core {
             token,
             kind: "captcha".into(),
         };
-        let step = match auth::password(
-            &current.session,
-            &current.username,
-            &current.password,
-            Some(&answer),
-        )
-        .await
-        {
-            Ok(step) => self.after_password(&mut current, step).await,
-            Err(failure) => Err(failure.into()),
+        // Whatever Proton wants verified next in this sign-in is first
+        // tried with this answer.
+        current.session.set_verification(Some(answer.clone()));
+        let step = match std::mem::replace(&mut current.resume, Resume::Password) {
+            Resume::Password => {
+                match auth::password(
+                    &current.session,
+                    &current.username,
+                    &current.password,
+                    Some(&answer),
+                )
+                .await
+                {
+                    Ok(step) => self.after_password(&mut current, step).await,
+                    Err(failure) => Err(failure.into()),
+                }
+            }
+            Resume::Totp => Ok(ProtonSignIn::Totp),
+            Resume::Finish(key_password) => self.finish(&mut current, &key_password).await,
         };
         self.keep(&mut pending, current, step).await
     }
@@ -148,6 +187,10 @@ impl crate::Core {
             .ok_or_else(nothing_pending)?
             .needs_mailbox_password;
         if let Err(failure) = auth::totp(&current.session, code).await {
+            if let Some(challenge) = challenge_in(&failure) {
+                let step = self.challenge(&mut current, challenge, Resume::Totp).await;
+                return self.keep(&mut pending, current, step).await;
+            }
             // A wrong code can be typed again while Proton allows it.
             let error = CoreError::from(failure);
             *pending = Some(current);
@@ -203,24 +246,36 @@ impl crate::Core {
         step
     }
 
+    /// Opens Proton's CAPTCHA for `challenge`; the sign-in goes on at
+    /// `resume` once it is solved.
+    async fn challenge(
+        &self,
+        current: &mut Pending,
+        challenge: HumanVerification,
+        resume: Resume,
+    ) -> Result<ProtonSignIn> {
+        if !challenge.methods.iter().any(|method| method == "captcha") {
+            return Err(CoreError::Auth(
+                "Proton wants this sign-in verified in a way Flectar Mail can't do. Sign in at account.proton.me once, then try again."
+                    .into(),
+            ));
+        }
+        let captcha = hv::start(
+            Owner::App,
+            api::captcha_origin(current.session.base()),
+            &challenge.token,
+        )
+        .await?;
+        let url = captcha.url.clone();
+        current.captcha = Some(captcha);
+        current.resume = resume;
+        Ok(ProtonSignIn::Captcha { url })
+    }
+
     async fn after_password(&self, current: &mut Pending, step: Step) -> Result<ProtonSignIn> {
         match step {
             Step::HumanVerification(challenge) => {
-                if !challenge.methods.iter().any(|method| method == "captcha") {
-                    return Err(CoreError::Auth(
-                        "Proton wants this sign-in verified in a way Flectar Mail can't do. Sign in at account.proton.me once, then try again."
-                            .into(),
-                    ));
-                }
-                let captcha = hv::start(
-                    Owner::App,
-                    api::captcha_origin(current.session.base()),
-                    &challenge.token,
-                )
-                .await?;
-                let url = captcha.url.clone();
-                current.captcha = Some(captcha);
-                Ok(ProtonSignIn::Captcha { url })
+                self.challenge(current, challenge, Resume::Password).await
             }
             Step::SignedIn(signed_in) => {
                 if signed_in.security_key_only {
@@ -244,13 +299,23 @@ impl crate::Core {
     /// Unlocks the keys with `key_password`, stores the session, and adds
     /// the account or signs the existing one in again.
     async fn finish(&self, current: &mut Pending, key_password: &str) -> Result<ProtonSignIn> {
-        let passphrase = auth::key_passphrase(&current.session, key_password).await?;
+        let (passphrase, addresses) = match unlock(&current.session, key_password).await {
+            Ok(unlocked) => unlocked,
+            Err(failure) => {
+                return match challenge_in(&failure) {
+                    Some(challenge) => {
+                        self.challenge(current, challenge, Resume::Finish(key_password.to_owned()))
+                            .await
+                    }
+                    None => Err(failure.into()),
+                };
+            }
+        };
         let tokens = current
             .session
             .tokens()
             .await
             .ok_or(CoreError::NeedsReauth)?;
-        let addresses = keys::fetch_addresses(&current.session).await?;
         let primary = addresses
             .iter()
             .filter(|address| address.status == 1)

@@ -18,7 +18,9 @@ password, which is never kept.
   in the browser, the code from an authenticator app, the mailbox password
   of an account with two. An account that only offers a security key is
   told so. Signing in to an address that is here already signs that account
-  in again.
+  in again. Proton may ask for the CAPTCHA at the password or at any
+  step after it; a later request it wants verified is first sent again
+  with the CAPTCHA already solved, and only then is another one opened.
 - **What is stored** (`proton/stored.rs`): the session tokens and the key
   passphrase, as one value in the credential store. Every refreshed token
   pair is saved before the request that needed it goes on, as Proton's

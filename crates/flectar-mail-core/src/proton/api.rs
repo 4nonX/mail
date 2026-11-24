@@ -209,6 +209,10 @@ pub struct Session {
     /// that find the access token expired must not both spend it.
     refreshing: Mutex<()>,
     saver: std::sync::Mutex<Option<Saver>>,
+    /// The last solved challenge of this session. Proton may ask for proof
+    /// of a person again on a later request; that request is sent once more
+    /// with this answer before anyone is asked to solve another.
+    verified: std::sync::Mutex<Option<HumanVerificationAnswer>>,
 }
 
 /// Keeps a refreshed token pair. It runs before the request that needed the
@@ -250,7 +254,21 @@ impl Session {
             tokens: Mutex::new(tokens),
             refreshing: Mutex::new(()),
             saver: std::sync::Mutex::new(None),
+            verified: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Keeps a solved challenge for the requests of this session that Proton
+    /// wants verified as well.
+    pub fn set_verification(&self, answer: Option<HumanVerificationAnswer>) {
+        *self.verified.lock().unwrap_or_else(|e| e.into_inner()) = answer;
+    }
+
+    fn verification(&self) -> Option<HumanVerificationAnswer> {
+        self.verified
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Has every refreshed token pair kept by `saver`.
@@ -271,8 +289,32 @@ impl Session {
     }
 
     /// Sends a request and parses the answer, refreshing the access token
-    /// once when Proton says it expired.
+    /// once when Proton says it expired. A request Proton wants verified is
+    /// sent once more with the challenge this session solved last, if any.
     pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        verification: Option<&HumanVerificationAnswer>,
+    ) -> ApiResult<T> {
+        match self
+            .call_once(method.clone(), path, body, verification)
+            .await
+        {
+            Err(Failure::Api(error))
+                if error.code == CODE_HUMAN_VERIFICATION && verification.is_none() =>
+            {
+                match self.verification() {
+                    Some(answer) => self.call_once(method, path, body, Some(&answer)).await,
+                    None => Err(Failure::Api(error)),
+                }
+            }
+            other => other,
+        }
+    }
+
+    async fn call_once<T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -562,6 +604,70 @@ mod tests {
         };
         assert_eq!(error.code, 2001);
         assert!(error.human_verification().is_none());
+    }
+
+    /// Answers each request in turn with the next of `answers`, and hands
+    /// back what was asked.
+    async fn serve_in_turn(
+        answers: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let served = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in answers {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0, "the request ended before its headers did");
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                requests.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+                let answer = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(answer.as_bytes()).await.unwrap();
+                let _ = stream.shutdown().await;
+            }
+            requests
+        });
+        (base, served)
+    }
+
+    const CHALLENGE: &str = r#"{"Code":9001,"Error":"Human verification required","Details":{"HumanVerificationToken":"next","HumanVerificationMethods":["captcha"]}}"#;
+
+    #[tokio::test]
+    async fn a_request_proton_wants_verified_goes_again_with_the_solved_challenge() {
+        let (base, served) =
+            serve_in_turn(vec![(422, CHALLENGE), (200, r#"{"Code":1000,"Value":7}"#)]).await;
+        let session = Session::with_base(Owner::App, &base, None);
+        session.set_verification(Some(HumanVerificationAnswer {
+            token: "solved".into(),
+            kind: "captcha".into(),
+        }));
+        let answer: Value = session.get("/core/v4/users").await.unwrap();
+        assert_eq!(answer["Value"], 7);
+        let requests = served.await.unwrap();
+        assert!(!requests[0].contains("x-pm-human-verification-token"));
+        assert!(requests[1].contains("x-pm-human-verification-token: solved"));
+        assert!(requests[1].contains("x-pm-human-verification-token-type: captcha"));
+    }
+
+    #[tokio::test]
+    async fn a_challenge_nothing_answers_comes_back_as_it_is() {
+        let (base, served) = serve_in_turn(vec![(422, CHALLENGE)]).await;
+        let session = Session::with_base(Owner::App, &base, None);
+        let Err(Failure::Api(error)) = session.get::<Value>("/core/v4/users").await else {
+            panic!("expected Proton's challenge");
+        };
+        assert_eq!(error.human_verification().unwrap().token, "next");
+        assert_eq!(served.await.unwrap().len(), 1);
     }
 
     #[test]
