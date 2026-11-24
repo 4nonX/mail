@@ -7,6 +7,7 @@
 pub(crate) mod actions;
 pub mod api;
 pub mod auth;
+pub mod bridge;
 pub(crate) mod folders;
 pub mod hv;
 pub mod keys;

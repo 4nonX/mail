@@ -2813,6 +2813,9 @@ impl Core {
     /// ready, and return once they run: for a check in the background, where
     /// no window shows.
     pub async fn start_accounts_now(&self) {
+        // Start a managed Proton Bridge core before account workers connect,
+        // so a Bridge-backed account's loopback IMAP/SMTP servers are up.
+        self.proton_bridge_boot().await;
         self.notify_ui_ready();
         let _ = self
             .accounts_started

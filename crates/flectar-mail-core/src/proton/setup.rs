@@ -94,7 +94,11 @@ async fn unlock(session: &Session, key_password: &str) -> ApiResult<(String, Vec
 impl crate::Core {
     /// Starts signing in to Proton with the account's name or address and
     /// its password.
-    pub async fn proton_sign_in(&self, username: &str, password: &str) -> Result<ProtonSignIn> {
+    pub async fn proton_direct_sign_in(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<ProtonSignIn> {
         let username = username.trim().to_owned();
         if username.is_empty() || password.is_empty() {
             return Err(CoreError::Auth(
@@ -123,7 +127,7 @@ impl crate::Core {
 
     /// Goes on once the CAPTCHA page is open: waits until it is solved and
     /// signs in with its answer.
-    pub async fn proton_sign_in_verified(&self) -> Result<ProtonSignIn> {
+    pub async fn proton_direct_sign_in_verified(&self) -> Result<ProtonSignIn> {
         // The wait can take minutes, so nothing is held meanwhile that
         // giving the sign-in up needs.
         let (id, captcha) = PENDING
@@ -178,7 +182,7 @@ impl crate::Core {
     }
 
     /// Gives the code from the authenticator app.
-    pub async fn proton_sign_in_totp(&self, code: &str) -> Result<ProtonSignIn> {
+    pub async fn proton_direct_sign_in_totp(&self, code: &str) -> Result<ProtonSignIn> {
         let mut pending = PENDING.lock().await;
         let mut current = pending.take().ok_or_else(nothing_pending)?;
         let needs_mailbox_password = current
@@ -209,7 +213,10 @@ impl crate::Core {
     }
 
     /// Gives the mailbox password of an account with two passwords.
-    pub async fn proton_sign_in_mailbox_password(&self, password: &str) -> Result<ProtonSignIn> {
+    pub async fn proton_direct_sign_in_mailbox_password(
+        &self,
+        password: &str,
+    ) -> Result<ProtonSignIn> {
         let mut pending = PENDING.lock().await;
         let mut current = pending.take().ok_or_else(nothing_pending)?;
         match self.finish(&mut current, password).await {
@@ -223,7 +230,7 @@ impl crate::Core {
     }
 
     /// Gives up the sign-in under way, and ends its session on Proton.
-    pub async fn proton_sign_in_cancel(&self) {
+    pub async fn proton_direct_sign_in_cancel(&self) {
         CANCELLED.notify_waiters();
         if let Some(previous) = PENDING.lock().await.take() {
             auth::sign_out(&previous.session).await;

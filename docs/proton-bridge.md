@@ -42,12 +42,29 @@ contract (vendored from upstream as `crates/flectar-proton-bridge/proto/bridge.p
 
 1. **`crates/flectar-proton-bridge`** — the process manager, gRPC client and
    sign-in driver, tested end to end against a mock Bridge over TLS. (done)
-2. Wire the managed-Bridge path into account setup and the sign-in UI, then
-   create a local IMAP/SMTP account at `127.0.0.1` with the exported certificate
-   trusted and the Bridge password in the credential store.
-3. Bundle Proton's Bridge core binary (Windows x64, arm64 via emulation) in the
-   `Native platform artifacts` workflow; Flectar launches it from its install dir.
+2. **`crates/flectar-mail-core/src/proton/bridge.rs`** — the managed-Bridge path
+   behind the existing `Core::proton_sign_in*` methods (the UI is unchanged; the
+   direct-API sign-in is preserved as `proton_direct_*`). A background task runs
+   the callback-based Bridge sign-in and exchanges prompts/answers with the
+   step-by-step UI over channels; on success it creates an ordinary local
+   IMAP/SMTP account via `add_account_password` and records the account so the
+   core is restarted at the next launch (`start_accounts_now` → `proton_bridge_boot`).
+   (done)
+3. **CI bundling** — the `Native platform artifacts` Windows job downloads Proton
+   Mail Bridge (pinned **v3.27.2**, checksum-verified), installs it silently, and
+   copies it into `proton-bridge/` beside `flectar-mail.exe`. Flectar launches
+   `proton-bridge/proton-bridge.exe`. (done; needs a CI run to confirm the
+   installed layout on the runner)
 
-The vendored `bridge.proto` is GPL-3.0-or-later (Proton Mail Bridge); it is
-compatible with Flectar's AGPL-3.0. Re-vendor it whenever the bundled Bridge is
-updated.
+The vendored `bridge.proto` is GPL-3.0-or-later (Proton Mail Bridge); its content
+is identical on `main` and the pinned **v3.27.2** release, so the client matches
+the bundled core. Re-vendor and re-pin together whenever the bundled Bridge is
+updated. Bundling Proton's GPL-3.0 Bridge is compatible with Flectar's AGPL-3.0;
+the copied folder carries Bridge's own licence.
+
+## Not yet verified end to end
+
+Signing in requires a paid Proton account, the bundled core, and Windows, none of
+which can run in the build environment. The orchestration is unit-tested and the
+whole workspace compiles; the acceptance test is a Windows build where a paid
+account signs in and syncs.

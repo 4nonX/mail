@@ -2943,6 +2943,7 @@ dependencies = [
  "encoding_rs",
  "flectar-mail-sync-client",
  "flectar-mail-sync-crypto",
+ "flectar-proton-bridge",
  "futures",
  "hf-hub",
  "hostname",
