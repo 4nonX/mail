@@ -610,6 +610,31 @@ jobs:
           Copy-Item resources/fonts/noto-emoji/README.md "target/package/windows/LICENSES/Noto Emoji/"
           python scripts/test-pdf-preview.py target/package/windows/flectar-mail.exe
           if ($LASTEXITCODE -ne 0) { throw "Packaged PDF preview test failed" }
+          # Bundle Proton's own Mail Bridge core, which Flectar starts headless
+          # for managed-Bridge Proton accounts. Pinned release, checksum-verified.
+          # The x64 build is bundled for both arches; it runs under emulation on
+          # Windows arm64. Flectar launches proton-bridge/proton-bridge.exe.
+          $bridgeVersion = '3.27.2'
+          $bridgeSha = '60be9e343840391629dd692c9b3339dee98ee6ff140e150dcb3866921c3e3268'
+          $bridgeUrl = "https://github.com/ProtonMail/proton-bridge/releases/download/v$bridgeVersion/Bridge-Installer.exe"
+          $installer = Join-Path $env:RUNNER_TEMP 'Bridge-Installer.exe'
+          Invoke-WebRequest $bridgeUrl -OutFile $installer
+          $got = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $bridgeSha) { throw "Proton Bridge installer checksum mismatch: got $got" }
+          $appdir = Join-Path $env:RUNNER_TEMP 'proton-bridge-install'
+          $proc = Start-Process -FilePath $installer -ArgumentList '/exenoui','/quiet','/norestart',"APPDIR=$appdir" -Wait -PassThru
+          if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { throw "Proton Bridge install failed with exit code $($proc.ExitCode)" }
+          # Advanced Installer honours APPDIR, but fall back to the default
+          # install location if it ever changes.
+          $src = $appdir
+          if (-not (Test-Path (Join-Path $src 'proton-bridge.exe'))) {
+            $src = 'C:\Program Files\Proton AG\Proton Mail Bridge'
+          }
+          if (-not (Test-Path (Join-Path $src 'proton-bridge.exe'))) {
+            throw "Proton Bridge core (proton-bridge.exe) not found after install"
+          }
+          New-Item -ItemType Directory -Force target/package/windows/proton-bridge | Out-Null
+          Copy-Item "$src/*" target/package/windows/proton-bridge/ -Recurse -Force
           Compress-Archive -Path target/package/windows/* -DestinationPath "target/flectar-mail-windows-$env:ARCH.zip" -Force
 
       - name: Close the packaged app from its window
