@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/flectar-mail-core", "crates/flectar-spell", "crates/renderer-probe"]
+members = ["crates/flectar-mail-core", "crates/flectar-proton-bridge", "crates/flectar-spell", "crates/renderer-probe"]
 exclude = ["crates/blitz-dom", "crates/blitz-paint", "crates/fontique", "crates/i-slint-backend-android-activity", "crates/i-slint-backend-winit", "crates/i-slint-renderer-software", "crates/jmap-client", "crates/kem-pre", "crates/ml-kem-0.2", "crates/proton-rpgp", "crates/smithay-clipboard", "crates/spellbook", "crates/vello"]
 resolver = "3"
 
