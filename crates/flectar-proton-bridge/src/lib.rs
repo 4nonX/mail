@@ -21,6 +21,12 @@
 //!   readout of bridge password, mail-server ports and the TLS certificate.
 //! - [`Bridge`] ties the two together for the common case.
 
+// `tonic::Status` is a large type, so every function returning a
+// `Result<_, Status>` — the generated gRPC client, the auth interceptor —
+// trips `result_large_err`. That size is imposed by tonic, not something this
+// crate can fix; our own `Error` keeps the `Status` boxed so it stays small.
+#![allow(clippy::result_large_err)]
+
 mod client;
 mod config;
 mod process;
@@ -63,7 +69,7 @@ pub enum Error {
     #[error("could not connect to the Proton Bridge core: {0}")]
     Connect(String),
     #[error("Proton Bridge rejected the request: {0}")]
-    Rpc(#[from] tonic::Status),
+    Rpc(Box<tonic::Status>),
     #[error(
         "this Proton account needs a paid plan: Proton Mail Bridge is not available for free accounts"
     )]
@@ -76,6 +82,13 @@ pub enum Error {
     StreamClosed,
     #[error("sign-in needs {0}, which could not be provided")]
     HandlerUnavailable(String),
+}
+
+impl From<tonic::Status> for Error {
+    fn from(status: tonic::Status) -> Self {
+        // Boxed so `Error` stays small (see the crate-level lint note above).
+        Error::Rpc(Box::new(status))
+    }
 }
 
 /// The result type used throughout this crate.

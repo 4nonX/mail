@@ -6,6 +6,11 @@
 //! same TLS + server-token + event-stream protocol the Bridge core does, so
 //! the sign-in choreography and the readout are exercised end to end.
 
+// The mock Bridge server implements tonic's generated trait, whose methods
+// return `Result<_, tonic::Status>`; `Status` is large, so silence the lint
+// for this test crate rather than boxing every mock response.
+#![allow(clippy::result_large_err)]
+
 use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
 use std::sync::Mutex as StdMutex;
