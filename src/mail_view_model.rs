@@ -1442,8 +1442,8 @@ pub(super) fn refresh_rows_only(
     // it shows once the refreshed row has it, without rendering the message
     // again. They used to wait for the next selection.
     if let Some(email) = selected_email.as_ref() {
-        app.set_selected_starred(email.starred);
-        app.set_selected_unread(email.unread);
+        app.global::<ReaderUi>().set_selected_starred(email.starred);
+        app.global::<ReaderUi>().set_selected_unread(email.unread);
     }
     refresh_sidebar(state);
     let selected_domain = selected_email.as_ref().map(|email| {

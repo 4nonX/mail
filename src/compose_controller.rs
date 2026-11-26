@@ -337,10 +337,10 @@ pub(super) fn perform_selected_action(
     // Show the new state at once; the refresh after the action confirms it,
     // and a failed action puts the row's state back.
     match action {
-        "star" => app.set_selected_starred(true),
-        "unstar" => app.set_selected_starred(false),
-        "mark_read" => app.set_selected_unread(false),
-        "mark_unread" => app.set_selected_unread(true),
+        "star" => app.global::<ReaderUi>().set_selected_starred(true),
+        "unstar" => app.global::<ReaderUi>().set_selected_starred(false),
+        "mark_read" => app.global::<ReaderUi>().set_selected_unread(false),
+        "mark_unread" => app.global::<ReaderUi>().set_selected_unread(true),
         _ => {}
     }
     Ok(())
