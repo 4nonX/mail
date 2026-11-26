@@ -197,14 +197,15 @@ jobs:
           cargo install slint-tr-extractor --version 1.19.0 --locked
           bash scripts/check-translations.sh
       - name: Fetch the Flectar Mail Sync server for the end-to-end sync tests
-        # The server is private: its image grants this repository read
-        # access. A pull request from a fork can't pull it, so there the
-        # end-to-end sync tests skip. Anywhere else a failed pull fails the
-        # job, so the tests never skip unnoticed.
+        # The server is private: its image grants only the upstream
+        # flectar/mail repository read access. A fork can't pull it (whether
+        # from a pull request or a branch build), so there the end-to-end sync
+        # tests skip. On upstream a failed pull fails the job, so the tests
+        # never skip unnoticed.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          FORK_PULL_REQUEST: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          FORK_PULL_REQUEST: ${{ github.repository != 'flectar/mail' }}
           # Pinned by digest, and the tag names the server commit it was built
           # from. Update both together when the tests need a newer server.
           SYNC_SERVER_IMAGE: ghcr.io/flectar/mail-sync-server:sha-11097b0@sha256:73141b5afdc57f5511512875c72d5d569d495aaaf5c082f2a992cfa3a40684e1
