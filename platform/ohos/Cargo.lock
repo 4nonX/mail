@@ -2666,12 +2666,14 @@ dependencies = [
  "jmap-client",
  "keyring",
  "lettre",
+ "libc",
  "mail-builder",
  "mail-parser",
  "once_cell",
  "percent-encoding",
  "proton-crypto",
  "proton-crypto-account",
+ "psl",
  "quick-xml 0.42.0",
  "rand 0.9.5",
  "regex",
@@ -2708,12 +2710,13 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
 name = "flectar-mail-sync-client"
 version = "0.1.0"
-source = "git+https://github.com/flectar/mail-sync-client?rev=bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a#bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a"
+source = "git+https://github.com/flectar/mail-sync-client?rev=f09489df8b9c7c870e95a0421ec1818d0ff1eaf6#f09489df8b9c7c870e95a0421ec1818d0ff1eaf6"
 dependencies = [
  "flectar-mail-sync-crypto",
  "flectar-mail-sync-proto",
@@ -2731,7 +2734,7 @@ dependencies = [
 [[package]]
 name = "flectar-mail-sync-crypto"
 version = "0.1.0"
-source = "git+https://github.com/flectar/mail-sync-client?rev=bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a#bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a"
+source = "git+https://github.com/flectar/mail-sync-client?rev=f09489df8b9c7c870e95a0421ec1818d0ff1eaf6#f09489df8b9c7c870e95a0421ec1818d0ff1eaf6"
 dependencies = [
  "bip39",
  "chacha20poly1305",
@@ -2748,7 +2751,7 @@ dependencies = [
 [[package]]
 name = "flectar-mail-sync-proto"
 version = "0.1.0"
-source = "git+https://github.com/flectar/mail-sync-client?rev=bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a#bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a"
+source = "git+https://github.com/flectar/mail-sync-client?rev=f09489df8b9c7c870e95a0421ec1818d0ff1eaf6#f09489df8b9c7c870e95a0421ec1818d0ff1eaf6"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -3902,8 +3905,6 @@ dependencies = [
 [[package]]
 name = "i-slint-core"
 version = "1.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9590458a3ba4ad8e66a6b572dbe758cc5d4f84f57e682a097358e4fe0f02b006"
 dependencies = [
  "async-channel 2.5.0",
  "bitflags 2.13.2",
@@ -4472,12 +4473,12 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5e77cbfb9fff4798e283c2d69dff39fc2c45e7da017e5ce95b654e46ea41236"
+checksum = "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f"
 dependencies = [
- "jiff-core 1.0.1",
- "jiff-static 1.0.2",
+ "jiff-core 1.0.2",
+ "jiff-static 1.0.3",
  "jiff-tzdb-platform 1.0.0",
  "log",
  "portable-atomic",
@@ -4497,9 +4498,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "1.0.1"
+version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
+checksum = "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f"
 dependencies = [
  "log",
 ]
@@ -4518,11 +4519,11 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9067a0b23e5be3147d56b2dcf652b18e6b1364caca93fb157653b6fbcab23a9"
+checksum = "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8"
 dependencies = [
- "jiff-core 1.0.1",
+ "jiff-core 1.0.2",
  "proc-macro2",
  "quote",
  "syn 3.0.7",
@@ -4815,7 +4816,6 @@ dependencies = [
  "email_address",
  "futures-io",
  "futures-util",
- "hostname",
  "idna",
  "nom 8.0.0",
  "percent-encoding",
@@ -6753,6 +6753,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl"
+version = "2.1.249"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d5a4e068733aa4f2ef06083331e02678699f997128ad66e57a8adc7e3f654ba0"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
 name = "pulldown-cmark"
 version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7804,7 +7819,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.14.2",
  "jiff 0.2.46",
- "jiff 1.0.2",
+ "jiff 1.0.3",
  "schemars 0.9.0",
  "schemars 1.2.3",
  "serde_core",
@@ -8747,9 +8762,9 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa"
+checksum = "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d"
 dependencies = [
  "serde",
  "slotmap",

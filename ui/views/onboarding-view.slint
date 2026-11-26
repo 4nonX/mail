@@ -5,6 +5,7 @@ import { OAuthBrowserHelp } from "../components/oauth-browser-help.slint";
 import { HorizontalBox, ScrollView, VerticalBox } from "std-widgets.slint";
 import { Button } from "../components/button.slint";
 import { CopyableDiagnostic } from "../components/copyable-diagnostic.slint";
+import { AccountDiscovery, AccountDiscoveryNotice } from "../account-discovery.slint";
 import { LineEdit, TextLink } from "../components/controls.slint";
 import { ProviderButton } from "../components/provider-button.slint";
 import { OAuthSetupDialog } from "../dialogs/oauth-setup-dialog.slint";
@@ -78,6 +79,7 @@ export component OnboardingView inherits Rectangle {
     private property <bool> needs-servers: root.account-protocol != "jmap" && root.account-protocol != "proton";
     private property <bool> account-form-valid: root.account-email != ""
         && root.account-password != ""
+        && AccountDiscovery.ready
         && (!root.needs-servers || (
             root.incoming-host != ""
             && root.incoming-port != ""
@@ -85,6 +87,8 @@ export component OnboardingView inherits Rectangle {
 
     function open-new-mail-account() {
         root.account-email = "";
+        AccountDiscovery.state = "";
+        AccountDiscovery.confirmed = false;
         root.account-username = "";
         root.account-password = "";
         root.account-protocol = "imap";
@@ -111,6 +115,8 @@ export component OnboardingView inherits Rectangle {
             root.incoming-port = MailPorts.incoming(protocol, root.incoming-security);
         }
         root.account-protocol = protocol;
+        // Settings found for the address may list this protocol's server.
+        root.suggest-account-settings(root.account-email);
     }
 
     background: root.page-bg;
@@ -263,7 +269,16 @@ export component OnboardingView inherits Rectangle {
                     wrap: word-wrap;
                 }
                 // Stacked like the buttons above: translations of these labels
-                // run long.
+                // run long. A phone scans the code its other device shows,
+                // and a computer shows one for a phone to scan.
+                if SyncUi.can-scan : Button {
+                    height: 40px;
+                    text: @tr("Scan QR code");
+                    icon: @image-url("../icons/lucide/outline/scan-qr.svg");
+                    has-icon: true;
+                    enabled: !root.account-setup-in-progress && !root.oauth-in-progress && !root.oauth-settings-saving && !SyncUi.busy;
+                    clicked => { root.join-sync("scan"); }
+                }
                 Button {
                     height: 40px;
                     text: @tr("Enter code");
@@ -271,6 +286,14 @@ export component OnboardingView inherits Rectangle {
                     has-icon: true;
                     enabled: !root.account-setup-in-progress && !root.oauth-in-progress && !root.oauth-settings-saving && !SyncUi.busy;
                     clicked => { root.join-sync("code"); }
+                }
+                if SyncUi.qr-pairing && !SyncUi.can-scan : Button {
+                    height: 40px;
+                    text: @tr("Show QR code");
+                    icon: @image-url("../icons/lucide/outline/qr-code.svg");
+                    has-icon: true;
+                    enabled: !root.account-setup-in-progress && !root.oauth-in-progress && !root.oauth-settings-saving && !SyncUi.busy;
+                    clicked => { root.join-sync("qr"); }
                 }
                 Button {
                     height: 40px;
@@ -349,6 +372,7 @@ export component OnboardingView inherits Rectangle {
                     value <=> root.account-username;
                     placeholder: @tr("Username (defaults to email)");
                 }
+                if AccountDiscovery.state != "" : AccountDiscoveryNotice { enabled: !root.account-setup-in-progress; text-color: root.muted-text; }
                 FormField {
                     enabled: !root.account-setup-in-progress;
                     height: 60px;

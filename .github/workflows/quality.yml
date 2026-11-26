@@ -81,6 +81,9 @@ jobs:
           toolchain: stable
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        # Release tags run this workflow as their quality gate, and they build
+        # without caches (native-platforms.yml).
+        if: github.ref_type != 'tag'
         with:
           key: quality-default
           # Every pull request can restore caches saved on main. Caches saved by
@@ -141,11 +144,13 @@ jobs:
         run: python3 scripts/verify-slint-android-activity.py
       - name: Verify the Slint software renderer clip fix
         run: python3 scripts/verify-slint-renderer-software.py
+      - name: Verify the Slint core fling fix
+        run: python3 scripts/verify-slint-core.py
       - name: Verify the fontique slant fix
         run: python3 scripts/verify-fontique.py
       - name: Verify the Vello bitmap strike fix
         run: python3 scripts/verify-vello.py
-      - name: Verify the jmap-client proxy patch
+      - name: Verify the jmap-client patches
         run: python3 scripts/verify-jmap-client.py
       - name: Verify and test the smithay-clipboard file drop patch
         run: |
@@ -193,21 +198,34 @@ jobs:
           bash scripts/check-translations.sh
       - name: Fetch the Flectar Mail Sync server for the end-to-end sync tests
         # The server is private: its image grants this repository read
-        # access. Where it can't be pulled, as in a fork, the end-to-end sync
-        # tests skip.
+        # access. A pull request from a fork can't pull it, so there the
+        # end-to-end sync tests skip. Anywhere else a failed pull fails the
+        # job, so the tests never skip unnoticed.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          FORK_PULL_REQUEST: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          # Pinned by digest, and the tag names the server commit it was built
+          # from. Update both together when the tests need a newer server.
+          SYNC_SERVER_IMAGE: ghcr.io/flectar/mail-sync-server:sha-11097b0@sha256:73141b5afdc57f5511512875c72d5d569d495aaaf5c082f2a992cfa3a40684e1
         run: |
+          pulled=false
           if echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
-            && docker create --name sync-server ghcr.io/flectar/mail-sync-server:main > /dev/null; then
+            && docker create --name sync-server "$SYNC_SERVER_IMAGE" > /dev/null; then
             docker cp sync-server:/usr/local/bin/flectar-mail-sync-server "$RUNNER_TEMP/"
             docker rm sync-server > /dev/null
             echo "FLECTAR_MAIL_SYNC_SERVER=$RUNNER_TEMP/flectar-mail-sync-server" >> "$GITHUB_ENV"
-          else
-            echo "::warning::The Flectar Mail Sync server image can't be pulled; the end-to-end sync tests skip."
+            pulled=true
           fi
           docker logout ghcr.io > /dev/null || true
+          if [ "$pulled" = false ]; then
+            if [ "$FORK_PULL_REQUEST" = true ]; then
+              echo "::warning::A fork can't pull the Flectar Mail Sync server image; the end-to-end sync tests skip."
+            else
+              echo "::error::The Flectar Mail Sync server image can't be pulled, so the end-to-end sync tests can't run."
+              exit 1
+            fi
+          fi
       - name: Run the default test suite
         run: cargo test --workspace --all-targets --locked
       - name: Test the vendored Blitz patches
@@ -261,6 +279,7 @@ jobs:
           components: clippy
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: github.ref_type != 'tag'
         with:
           key: quality-${{ matrix.name }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -327,6 +346,7 @@ jobs:
           toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: github.ref_type != 'tag'
         with:
           key: quality-embeddings
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -356,6 +376,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: github.ref_type != 'tag'
         with:
           key: quality-flatpak-secrets
           workspaces: packaging/flatpak/secret-portal-test
@@ -383,6 +404,7 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: github.ref_type != 'tag'
         with:
           cache-targets: false
           key: quality-rustsec

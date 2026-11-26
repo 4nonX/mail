@@ -136,6 +136,8 @@ impl From<WarmStartMessage> for mail::MailMessage {
             reply_reminder_at: None,
             reply_reminder_due: false,
             to: String::new(),
+            to_people: Vec::new(),
+            cc_people: Vec::new(),
             label: message.label,
             unread: message.unread,
             starred: message.starred,
@@ -190,6 +192,8 @@ pub(crate) struct WarmStartMailbox {
     pub(crate) can_rename: bool,
     #[serde(default)]
     pub(crate) can_delete: bool,
+    #[serde(default)]
+    pub(crate) can_hide: bool,
     pub(crate) label: String,
     /// Absent for account headings, which are not navigation targets.
     #[serde(default)]
@@ -222,6 +226,7 @@ impl From<&mail::MailboxEntry> for WarmStartMailbox {
             can_create_children: mailbox.can_create_children,
             can_rename: mailbox.can_rename,
             can_delete: mailbox.can_delete,
+            can_hide: mailbox.can_hide,
             label: mailbox.label.clone(),
             scope: mailbox.scope,
             context: mailbox.context.clone(),
@@ -246,6 +251,7 @@ impl From<WarmStartMailbox> for mail::MailboxEntry {
             can_create_children: mailbox.can_create_children,
             can_rename: mailbox.can_rename,
             can_delete: mailbox.can_delete,
+            can_hide: mailbox.can_hide,
             label: mailbox.label,
             scope: mailbox.scope,
             context: mailbox.context,
@@ -643,11 +649,10 @@ pub(crate) struct DeviceSyncUpdates {
     pub(crate) pairing: Vec<(u64, flectar_mail_core::device_sync::PairingEvent)>,
     /// Another device changed synced preferences.
     pub(crate) settings_changed: bool,
-    /// Another device changed accounts; these were removed.
+    /// Another device changed accounts.
     pub(crate) accounts_changed: bool,
     /// Another device blocked a sender, or stopped blocking one.
     pub(crate) blocked_changed: bool,
-    pub(crate) removed_accounts: Vec<i64>,
     /// Events were lost, so the accounts are read again, without saying
     /// another device changed them.
     pub(crate) accounts_reread: bool,
@@ -896,7 +901,7 @@ pub(crate) fn spawn_core_event_listener(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .device_sync
-                        .status = Some(status);
+                        .status = Some(*status);
                     true
                 }
                 Ok(CoreEvent::DeviceSyncPairing { pairing, event }) => {
@@ -928,15 +933,15 @@ pub(crate) fn spawn_core_event_listener(
                         .blocked_changed = true;
                     true
                 }
-                Ok(CoreEvent::AccountsChanged { removed }) => {
+                Ok(CoreEvent::AccountsChanged) => {
                     // Before the window reads the accounts again, so a
-                    // snapshot read earlier can't bring the old ones back.
+                    // snapshot read earlier can't put back what changed.
                     accounts_changed.note();
-                    let mut pending = pending
+                    pending
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    pending.device_sync.accounts_changed = true;
-                    pending.device_sync.removed_accounts.extend(removed);
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .device_sync
+                        .accounts_changed = true;
                     true
                 }
                 Err(RecvError::Lagged(_)) => {
@@ -1013,6 +1018,7 @@ pub(crate) fn apply_settings(app: &AppWindow, settings: &Settings) {
     });
     app.set_undo_send_seconds(i32::try_from(settings.undo_send_seconds.clamp(0, 30)).unwrap_or(10));
     app.set_compose_font(settings.compose_font.as_str().into());
+    app.set_compose_in_window(settings.compose_in_window);
     app.set_compose_text_size(settings.compose_text_size.as_str().into());
     app.set_mark_read(settings.mark_read.as_str().into());
     app.set_collect_outgoing_contacts(settings.collect_outgoing_contacts);
@@ -1431,6 +1437,8 @@ mod warm_start_tests {
             reply_reminder_at: None,
             reply_reminder_due: false,
             to: "secret-recipient@example.com".into(),
+            to_people: Vec::new(),
+            cc_people: Vec::new(),
             label: "UNREAD".into(),
             unread: true,
             starred: false,
@@ -1476,6 +1484,7 @@ mod warm_start_tests {
             can_create_children: true,
             can_rename: false,
             can_delete: false,
+            can_hide: false,
             label: "Inbox".into(),
             scope: Some(PERSON_INBOX),
             context: "Person".into(),

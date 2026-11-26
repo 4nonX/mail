@@ -1,13 +1,17 @@
 export { AccountMailPreferences, SignatureChoice } from "components/account-mail-preferences.slint";
 import { OpenPgpReader } from "components/account-mail-preferences.slint";
 import { MailAttachments } from "models.slint";
+import { ReaderUi } from "reader-ui.slint";
 import { AttachmentPreviewDialog } from "dialogs/attachment-preview-dialog.slint";
 export { MailAttachments, MailAttachment } from "models.slint";
+export { ReaderUi, ReaderWindows } from "reader-ui.slint";
+export { ReaderWindow } from "reader-window.slint";
 export { ZoomApi } from "components/zoom-controls.slint";
 export { ProtonSignIn } from "components/proton-sign-in.slint";
 export { ReadReceipts, ReturnedReceipt } from "read-receipts.slint";
 export { FolderRoles, FolderRoleRow } from "folder-roles.slint";
 export { MessageSource } from "message-source.slint";
+export { FolderVisibility, FolderShownRow } from "folder-visibility.slint";
 export { Translation, TranslationLanguage } from "translation.slint";
 export { Ai, AiPromptRow } from "ai.slint";
 export { AiSummary } from "ai-summary.slint";
@@ -22,7 +26,9 @@ export { Updates } from "updates.slint";
 export { AgentAccess, AgentAccount, AgentActivityEntry, AgentFolder } from "agent-access.slint";
 export { Notice } from "notice.slint";
 export { Unsubscribe } from "unsubscribe.slint";
+export { AccountDiscovery, DavLookup } from "account-discovery.slint";
 export { BlockSender } from "block-sender.slint";
+export { ContactImport } from "contact-import.slint";
 export { MailRules, RuleActionRow, RuleConditionRow, RuleRow } from "rules.slint";
 import { MailRules } from "rules.slint";
 export { Invitation } from "invitation.slint";
@@ -30,6 +36,7 @@ export { InvitationSettings } from "invitation-settings.slint";
 import { AppIcon, AppIconVariant } from "app-icon.slint";
 import { AgentAccess } from "agent-access.slint";
 import { WindowChrome, WindowControls, WindowDragArea } from "window-chrome.slint";
+import { DialogArea, WindowBackdrop } from "components/window-backdrop.slint";
 // Bundled once at compile time and used throughout the application chrome.
 // Rust registers the separate Noto Emoji face before constructing this window.
 import "../resources/fonts/google-sans-flex/GoogleSansFlex-VariableFont_GRAD,ROND,opsz,slnt,wdth,wght.ttf";
@@ -44,10 +51,10 @@ export { InterfaceText } from "typography.slint";
 import { AppTheme, LayoutMetrics, MotionSettings } from "design-system.slint";
 import { Button } from "components/button.slint";
 import { LoadingSkeletonBlock } from "components/loading-skeleton.slint";
-import { AccountRow, CalendarAgendaRow, CalendarAgendaFilterRow, CalendarBar, CalendarDay, CalendarEventRow, CalendarSourceRow, CalendarTimedBlock, CalendarWeekDay, ComposeAttachment, ComposeContact, ComposeEditorTile, ContactSidebarRow, ContactRow, ContactSyncState, ContactValueRow, EmailLink, EmailRow, EmailTemplateRow, EmailTile, LocalizedMessage, MailListEntry, MailProfileRow, ProfileMemberRow, SidebarRow, MailLabelRow, StorageUsageRow, ThreadMessageRow } from "models.slint";
+import { AccountRow, CalendarAgendaRow, CalendarAgendaFilterRow, CalendarBar, CalendarDay, CalendarEventRow, CalendarSourceRow, CalendarTimedBlock, CalendarWeekDay, ComposeAttachment, ComposeContact, ComposeEditorTile, ContactSidebarRow, ContactRow, ContactSyncState, ContactValueRow, EmailLink, EmailRow, EmailTemplateRow, EmailTile, LocalizedMessage, MailListEntry, MailProfileRow, ProfileMemberRow, SidebarRow, MailLabelRow, MessageDetails, StorageUsageRow, ThreadMessageRow } from "models.slint";
 export { EmailReader, ReaderCaret, ReaderImage, ReaderItem, MailDragApi } from "models.slint";
 export { MailListNavigation, MailNavigationTarget } from "models.slint";
-export { ThreadMessageRow, StorageUsageRow } from "models.slint";
+export { MessageDetails, ThreadMessageRow, StorageUsageRow } from "models.slint";
 export { CalendarAgendaNavigation } from "components/calendar-agenda.slint";
 export { KeyboardKeys, KeyChord } from "components/kbd.slint";
 import { FunctionalCalendarView } from "components/calendar.slint";
@@ -63,6 +70,8 @@ import { Notice } from "notice.slint";
 import { UnsubscribeDialog } from "dialogs/unsubscribe-dialog.slint";
 import { Unsubscribe } from "unsubscribe.slint";
 import { BlockSenderDialog } from "dialogs/block-sender-dialog.slint";
+import { ContactImportDialog } from "dialogs/contact-import-dialog.slint";
+import { ContactImport } from "contact-import.slint";
 import { BlockSender } from "block-sender.slint";
 import { BoundComposer, ComposerUi } from "components/composer-ui.slint";
 import { ComposerText } from "components/composer-fields.slint";
@@ -95,6 +104,7 @@ export { ThemeDraft } from "components/theme-editor.slint";
 import { ThemeDraft } from "components/theme-editor.slint";
 import { MailView } from "views/mail-view.slint";
 export { MessageColors } from "message-colors.slint";
+import { MessageColors } from "message-colors.slint";
 export { FilesUi, FileRow, OperationRow } from "views/files-view.slint";
 import { FilesView, FilesUi } from "views/files-view.slint";
 import { ContactsView } from "views/contacts-view.slint";
@@ -400,10 +410,12 @@ export global I18n {
         if (key == "{} of {} folders") { return @tr("{0} of {n} folder" | "{0} of {n} folders" % round(second-argument.to-float()), argument); }
         if (key == "Undo send preference saved.") { return @tr("Undo send preference saved."); }
         if (key == "Text style preference saved.") { return @tr("Text style preference saved."); }
+        if (key == "Writing window preference saved.") { return @tr("Writing window preference saved."); }
         if (key == "Could not save notifications: {}") { return @tr("Could not save notifications: {}", argument); }
         if (key == "Could not save the update preference: {}") { return @tr("Could not save the update preference: {}", argument); }
         if (key == "Could not save the undo send preference: {}") { return @tr("Could not save the undo send preference: {}", argument); }
         if (key == "Could not save the text style preference: {}") { return @tr("Could not save the text style preference: {}", argument); }
+        if (key == "Could not save the writing window preference: {}") { return @tr("Could not save the writing window preference: {}", argument); }
         if (key == "Could not save the signature: {}") { return @tr("Could not save the signature: {}", argument); }
         if (key == "Sync interval is active for this session.") { return @tr("Sync interval is active for this session."); }
         if (key == "Sync interval set to {} minutes.") { return @tr("Sync interval set to {} minutes.", argument); }
@@ -542,7 +554,6 @@ export global I18n {
         if (key == "Could not save account order: {}") { return @tr("Could not save account order: {}", argument); }
         if (key == "Mail history updated. Background sync is adjusting now.") { return @tr("Mail history updated. Background sync is adjusting now."); }
         if (key == "Account removed from this device.") { return @tr("Account removed from this device."); }
-        if (key == "Account removed on another device.") { return @tr("Account removed on another device."); }
         if (key == "Accounts updated from your other devices.") { return @tr("Accounts updated from your other devices."); }
         if (key == "Account removed. Mail refresh will retry.") { return @tr("Account removed. Mail refresh will retry."); }
         if (key == "Account removed; local cleanup needs a retry: {}") { return @tr("Account removed; local cleanup needs a retry: {}", argument); }
@@ -668,6 +679,7 @@ export global I18n {
         if (key == "Could not save the read receipt preference: {}") { return @tr("Could not save the read receipt preference: {}", argument); }
         if (key == "Could not answer the read receipt request: {}") { return @tr("Could not answer the read receipt request: {}", argument); }
         if (key == "Could not show the message: {}") { return @tr("Could not show the message: {}", argument); }
+        if (key == "Could not load the message: {}") { return @tr("Could not load the message: {}", argument); }
         if (key == "Could not save the translation setting: {}") { return @tr("Could not save the translation setting: {}", argument); }
         if (key == "Could not remove the key: {}") { return @tr("Could not remove the key: {}", argument); }
         if (key == "Could not save the prompts: {}") { return @tr("Could not save the prompts: {}", argument); }
@@ -731,6 +743,19 @@ export global I18n {
         if (key == "Saving the account name…") { return @tr("Saving the account name…"); }
         if (key == "Account name saved.") { return @tr("Account name saved."); }
         if (key == "Could not save the account name: {}") { return @tr("Could not save the account name: {}", argument); }
+        if (key == "Import contacts") { return @tr("Import contacts"); }
+        if (key == "Export contacts") { return @tr("Export contacts"); }
+        if (key == "vCard contacts") { return @tr("vCard contacts"); }
+        if (key == "Could not read the contacts file: {}") { return @tr("Could not read the contacts file: {}", argument); }
+        if (key == "This file is larger than 64 MB.") { return @tr("This file is larger than 64 MB."); }
+        if (key == "This file has more than 25,000 contacts.") { return @tr("This file has more than 25,000 contacts."); }
+        if (key == "No contacts found in this file.") { return @tr("No contacts found in this file."); }
+        if (key == "Imported {} contacts.") { return @tr("Imported one contact." | "Imported {0} contacts." % round(argument.to-float()), argument); }
+        if (key == "No new contacts to import.") { return @tr("No new contacts to import."); }
+        if (key == "Could not import contacts: {}") { return @tr("Could not import contacts: {}", argument); }
+        if (key == "Exported {} contacts.") { return @tr("Exported one contact." | "Exported {0} contacts." % round(argument.to-float()), argument); }
+        if (key == "No saved contacts to export.") { return @tr("No saved contacts to export."); }
+        if (key == "Could not export contacts: {}") { return @tr("Could not export contacts: {}", argument); }
         if (key == "Mail history requires local mail data.") { return @tr("Mail history requires local mail data."); }
         if (key == "Updating mail history…") { return @tr("Updating mail history…"); }
         if (key == "Remote images are unavailable in this minimal build.") { return @tr("Remote images are unavailable in this minimal build."); }
@@ -771,6 +796,7 @@ export global I18n {
         if (key == "Could not send the message: {}") { return @tr("Could not send the message: {}", argument); }
         if (key == "Could not cancel the send: {}") { return @tr("Could not cancel the send: {}", argument); }
         if (key == "Send cancelled. The message is a draft again.") { return @tr("Send cancelled. The message is a draft again."); }
+        if (key == "Send cancelled here, but another of your devices may still send it.") { return @tr("Send cancelled here, but another of your devices may still send it."); }
         if (key == "This message is no longer scheduled.") { return @tr("This message is no longer scheduled."); }
         if (key == "Choose a reminder after the time the message goes out.") { return @tr("Choose a reminder after the time the message goes out."); }
         if (key == "Reminds you {} if nobody replies") { return @tr("Reminds you {} if nobody replies", argument); }
@@ -825,6 +851,9 @@ export global I18n {
         if (key == "Could not create folder: {}") { return @tr("Could not create folder: {}", argument); }
         if (key == "Could not rename folder: {}") { return @tr("Could not rename folder: {}", argument); }
         if (key == "Could not delete folder: {}") { return @tr("Could not delete folder: {}", argument); }
+        if (key == "Folder hidden. Show it again in Settings → Accounts.") { return @tr("Folder hidden. Show it again in Settings → Accounts."); }
+        if (key == "Could not hide folder: {}") { return @tr("Could not hide folder: {}", argument); }
+        if (key == "Could not change the folder: {}") { return @tr("Could not change the folder: {}", argument); }
         if (key == "Could not close preview: {}") { return @tr("Could not close preview: {}", argument); }
         if (key == "Opened the system print view.") { return @tr("Opened the system print view."); }
         if (key == "Could not print message: {}") { return @tr("Could not print message: {}", argument); }
@@ -837,6 +866,7 @@ export global I18n {
         if (key == "Could not open draft: invalid account identifier") { return @tr("Could not open draft: invalid account identifier"); }
         if (key == "Connected account") { return @tr("Connected account"); }
         if (key == "Could not open composer: {}") { return @tr("Could not open composer: {}", argument); }
+        if (key == "Could not open the conversation's window: {}") { return @tr("Could not open the conversation's window: {}", argument); }
         if (key == "Add an account to send mail.") { return @tr("Add an account to send mail."); }
         if (key == "On this device") { return @tr("On this device"); }
         if (key == "Could not open composer: invalid account identifier") { return @tr("Could not open composer: invalid account identifier"); }
@@ -855,6 +885,7 @@ export global I18n {
         if (key == "Date: {}") { return @tr("forwarded message header" => "Date: {}", argument); }
         if (key == "Subject: {}") { return @tr("forwarded message header" => "Subject: {}", argument); }
         if (key == "To: {}") { return @tr("forwarded message header" => "To: {}", argument); }
+        if (key == "Cc: {}") { return @tr("forwarded message header" => "Cc: {}", argument); }
         if (key == "Attach files to this email") { return @tr("Attach files to this email"); }
         if (key == "Could not add attachments: {}") { return @tr("Could not add attachments: {}", argument); }
         if (key == "Could not show the quoted message: {}") { return @tr("Could not show the quoted message: {}", argument); }
@@ -975,11 +1006,17 @@ export global I18n {
     }
 }
 
-// Everything a composer window copies from the main window's look.
+// Everything composer and conversation windows copy from the main window's
+// look.
 struct Appearance {
     mode: string,
     preset: string,
     icon: AppIconVariant,
+    text-size: length,
+    motion: bool,
+    motion-preference: string,
+    motion-reduced: bool,
+    message-colors: string,
     light_primary: color,
     light_page: color,
     light_surface: color,
@@ -998,6 +1035,8 @@ struct Appearance {
 export component ComposerWindow inherits Window {
     // "light", "dark" or "system": the main window's theme-mode.
     in property <string> theme: "system";
+    // The main window's interface text size (src/text_size.rs).
+    in property <length> interface-text-size: 0px;
     in property <bool> attachment-picker-supported: true;
     // The window's close button asks the composer, which protects a
     // message with content behind its discard confirmation.
@@ -1008,6 +1047,7 @@ export component ComposerWindow inherits Window {
     title: ComposerUi.subject != "" ? ComposerUi.subject : ComposerText.mode-title(ComposerUi.mode);
     icon: AppIcon.window-image(AppIcon.variant);
     default-font-family: "Google Sans Flex";
+    default-font-size: root.interface-text-size;
     preferred-width: 760px;
     preferred-height: 720px;
     min-width: 420px;
@@ -1080,6 +1120,8 @@ export component AppWindow inherits Window {
     callback create_folder(int, int, string);
     callback rename_folder(int, string);
     callback delete_folder(int);
+    // Hide a folder from the sidebar and the Move to list (#253).
+    callback hide_folder(int);
     callback load_more();
     callback load_earlier_mail();
     callback sync_mail();
@@ -1138,6 +1180,7 @@ export component AppWindow inherits Window {
     callback save_sync_interval(int);
     callback save_undo_send(int);
     callback save_compose_text_style(string, string);
+    callback save_compose_in_window(bool);
     callback save_mark_read(string);
     callback save_list_rows();
     callback save_contact_discovery_settings(bool, bool, bool, bool);
@@ -1183,12 +1226,7 @@ export component AppWindow inherits Window {
     callback load_storage_usage();
     callback cancel_storage_usage();
     callback open_email_link(string);
-    callback copy_email_status(string);
     callback report_rendering_issue();
-    callback email-pointer-event(float, float, string, bool, bool, bool, bool);
-    callback email-scroll(float, float);
-    callback email-key-event(string, bool, bool, bool, bool, bool, bool);
-    callback select-email-text();
     callback set-remote-images(bool);
     callback load-remote-images-for-message();
     callback calendar-navigate(string, int);
@@ -1255,14 +1293,8 @@ export component AppWindow inherits Window {
 
     in property <[EmailRow]> emails: [];
     in property <[MailListEntry]> mail_list_entries: [];
-    in property <[ThreadMessageRow]> thread_messages: [];
-    in property <int> selected_thread_index: 0;
     in property <[SidebarRow]> sidebar_rows: [];
     in-out property <string> folder_filter_query: "";
-    in property <[MailLabelRow]> mail_labels: [];
-    in property <[MailLabelRow]> mail_label_results: [];
-    in property <int> selected_mail_label_count: 0;
-    in property <bool> selected_account_uses_labels: false;
     in property <[AccountRow]> connected_accounts: [];
     in property <bool> has_device_mail: false;
     in property <bool> mail_export_running: false;
@@ -1377,36 +1409,15 @@ export component AppWindow inherits Window {
     in-out property <int> mail_preview_lines: 1;
     // Files dragged over the window would start a new message with them.
     in property <bool> drop_starts_message: false;
-    in property <string> selected_sender: "";
-    in property <string> selected_address: "";
-    in property <string> selected_subject: "";
-    in property <string> selected_time: "";
-    in property <string> selected_to: "";
-    in property <string> selected_label: "";
-    in property <bool> selected_is_draft: false;
-    in property <string> selected_initials: "?";
-    in property <image> selected_favicon;
-    in property <bool> selected_has_favicon: false;
     in property <LocalizedMessage> render-message;
     property <string> render_status: I18n.ui-message(root.render-message.key, root.render-message.argument, root.render-message.second_argument, root.render-message.third_argument);
-    in property <string> selected_plain_text: "";
-    in property <string> selected_source: "";
-    in property <string> selected_text: "";
-    in property <bool> has_selection: false;
-    in property <string> clipboard_request: "";
-    in property <int> clipboard_request_id: 0;
     in property <LocalizedMessage> sync-message;
     property <string> sync_status: I18n.ui-message(root.sync-message.key, root.sync-message.argument, root.sync-message.second_argument, root.sync-message.third_argument);
     in property <bool> sync_in_progress: false;
     // Rust: an account's sidebar heading shows a problem.
     in property <bool> account_problem: false;
-    in property <[EmailTile]> email_tiles: [];
-    in property <[EmailLink]> email_links: [];
     // The renderer reports the total laid-out content height while retaining
     // only viewport-adjacent raster tiles.
-    in-out property <float> email-content-aspect: 900 / 520;
-    in-out property <bool> source_mode: false;
-    in-out property <bool> rendering_info_open: false;
     in property <bool> can_load_more: false;
     in property <bool> mail_loading_more: false;
     in property <bool> mail_page_loading: false;
@@ -1415,16 +1426,8 @@ export component AppWindow inherits Window {
     in property <bool> has_selected: true;
     in property <int> previous_email_id: -1;
     in property <int> next_email_id: -1;
-    in property <bool> selected_starred: false;
-    in property <bool> selected_unread: false;
-    in property <string> selected_sender_verification: "";
-    in-out property <bool> text_mode: false;
     // The Rust renderer reads these bindings during Slint's WGPU rendering
     // callback and reflows Blitz at the current logical viewport size.
-    in-out property <length> email-viewport-width: 0px;
-    in-out property <length> email-viewport-height: 0px;
-    in-out property <length> email-scroll-document-height: 0px;
-    in-out property <length> email-scroll-y: 0px;
     private property <bool> settings-open: root.active_view == "settings";
     // The join dialog was opened from the welcome screen, which has no
     // Settings to show it in.
@@ -1499,7 +1502,9 @@ export component AppWindow inherits Window {
     changed search_query => { TabsUi.navigated(); }
     changed search_filter => { TabsUi.navigated(); }
     changed has_selected => { TabsUi.navigated(); }
-    changed selected_subject => { TabsUi.navigated(); }
+    // The open message's subject names its tab.
+    private property <string> open-subject: ReaderUi.selected_subject;
+    changed open-subject => { TabsUi.navigated(); }
     changed calendar_selected_date => { TabsUi.navigated(); }
     changed calendar_view_mode => { TabsUi.navigated(); }
     // Own scan lifetime here: the conditional SettingsDialog is destroyed on
@@ -1548,6 +1553,8 @@ export component AppWindow inherits Window {
     in-out property <int> undo_send_seconds: 10;
     // The font and size new messages start in.
     in-out property <string> compose_font: "default";
+    // On the desktop, messages are written in a window of their own (#254).
+    in-out property <bool> compose_in_window: false;
     in-out property <string> compose_text_size: "normal";
     in-out property <string> mark_read: "immediately";
     in-out property <bool> collect_outgoing_contacts: true;
@@ -1564,7 +1571,6 @@ export component AppWindow inherits Window {
     in-out property <bool> oauth_in_progress: false;
     in property <bool> remote-images-available: true;
     in-out property <bool> remote-images-enabled: false;
-    in property <bool> remote-images-blocked: false;
     // The account a new message is written from: one the mail view shows.
     in-out property <int> compose_account_id: -1;
     in-out property <string> compose_from_label: @tr("No connected account");
@@ -1585,6 +1591,7 @@ export component AppWindow inherits Window {
     in-out property <string> carddav_username: "";
     in-out property <string> carddav_password: "";
     in-out property <bool> carddav_manage_existing: false;
+    in property <bool> carddav_connecting: false;
     in-out property <string> incoming_security: "tls";
     in-out property <string> smtp_security: "tls";
     in-out property <string> trusted_certificate_pem;
@@ -1690,11 +1697,54 @@ export component AppWindow inherits Window {
     private property <length> content-y: root.safe-area-insets.top + (root.top-bar ? WindowChrome.band-height : 0px);
     private property <length> content-width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
     private property <length> content-height: root.height - root.content-y - root.safe-area-insets.bottom;
+    // Dialogs dim the whole window. A dialog's own scrim covers the part of
+    // the window it opens over, and the backdrop dims the rest, the top bar,
+    // the tabs and the rail included. The dialogs placed here cover the
+    // content area; on phones the composer, the event editor and the
+    // attachment preview are full pages instead.
+    private property <bool> window-dialog-open: Unsubscribe.stage != ""
+        || BlockSender.stage != ""
+        || ContactImport.stage != ""
+        || root.trash-delete-open
+        || root.mark-all-read-open
+        || MailRules.run-open
+        || AutoReplies.question-open
+        || AccountImport.open
+        || MovePickerUi.open
+        || WhenUi.open
+        || SavedSearchUi.stage != ""
+        || root.folder-dialog-open
+        || (root.welcome-join && SyncUi.dialog == "join" && !(root.has-mail && root.settings-open))
+        || (!root.compact-layout && (ComposerUi.open || root.calendar-editor-shown || MailAttachments.open));
+    // The views report where their own dialogs open. Only the view on screen
+    // counts, since a view that goes away can't take its report back.
+    private property <DialogArea> settings-dialog;
+    private property <DialogArea> files-dialog;
+    private property <DialogArea> calendar-dialog;
+    private property <DialogArea> mail-dialog;
+    private property <DialogArea> no-dialog;
+    private property <DialogArea> view-dialog: !root.has-mail ? root.no-dialog
+        : root.active_view == "settings" ? root.settings-dialog
+        : root.active_view == "files" ? root.files-dialog
+        : root.active_view == "calendar" ? root.calendar-dialog
+        : root.active_view == "mail" ? root.mail-dialog
+        : root.no-dialog;
+    private property <DialogArea> dialog-area: root.window-dialog-open ? {
+        open: true,
+        x: root.content-x,
+        y: root.content-y,
+        width: root.content-width,
+        height: root.content-height,
+    } : root.view-dialog;
+    // Tab shortcuts wait while a dialog is open.
+    out property <bool> dialog-open: root.dialog-area.open;
     // Linux draws the whole frame, so it also provides the resize border and
     // window outline that the window manager would otherwise draw.
     private property <bool> client-frame: root.no-frame && !root.maximized && !root.full-screen;
+    // Settings opens from the drawers on phones, as a full page with its own
+    // close button.
     private property <bool> compact-primary-nav-visible: root.compact-layout
-        && !ComposerUi.open && !root.calendar-editor-shown
+        && !ComposerUi.open && !root.calendar-editor-shown && !root.settings-open
         && !(root.active_view == "mail" && root.mail-compact-page == "message")
         && !(root.active_view == "mail" && root.mail-folders-open)
         && !(root.active_view == "contacts" && root.contacts-detail-visible)
@@ -1876,11 +1926,14 @@ export component AppWindow inherits Window {
             : ColorScheme.unknown;
     }
 
-    // Composer windows have their own globals and follow this window's
-    // appearance through Rust.
+    // Composer and conversation windows have their own globals and follow
+    // this window's appearance through Rust.
     callback appearance-changed();
     private property <Appearance> appearance: {
         mode: root.theme-mode, preset: AppTheme.preset, icon: AppIcon.variant,
+        text-size: root.interface-text-size, motion: MotionSettings.enabled,
+        motion-preference: MotionSettings.preference, motion-reduced: MotionSettings.system-reduced,
+        message-colors: MessageColors.preference,
         light_primary: AppTheme.custom-light-primary, light_page: AppTheme.custom-light-page-bg,
         light_surface: AppTheme.custom-light-surface, light_text: AppTheme.custom-light-text,
         light_border: AppTheme.custom-light-border, dark_primary: AppTheme.custom-dark-primary,
@@ -2000,9 +2053,18 @@ export component AppWindow inherits Window {
             available-height: parent.height;
 
         MailView {
-            changed email-viewport-width => { root.email-viewport-width = self.email-viewport-width; }
-            changed email-viewport-height => { root.email-viewport-height = self.email-viewport-height; }
-            changed email-scroll-document-height => { root.email-scroll-document-height = self.email-scroll-document-height; }
+            // `changed` misses the sizes a new mail view starts with. A phone's
+            // window never resizes, so they're the only ones its reader gets.
+            init => {
+                ReaderUi.email-viewport-width = self.email-viewport-width;
+                ReaderUi.email-viewport-height = self.email-viewport-height;
+                ReaderUi.email-scroll-document-height = self.email-scroll-document-height;
+                root.mail-dialog = self.dialog-area;
+            }
+            changed dialog-area => { root.mail-dialog = self.dialog-area; }
+            changed email-viewport-width => { ReaderUi.email-viewport-width = self.email-viewport-width; }
+            changed email-viewport-height => { ReaderUi.email-viewport-height = self.email-viewport-height; }
+            changed email-scroll-document-height => { ReaderUi.email-scroll-document-height = self.email-scroll-document-height; }
             compact-page <=> root.mail-compact-page;
             folders-open <=> root.mail-folders-open;
             loading: !root.startup_hydrated || root.mail_page_loading;
@@ -2019,8 +2081,6 @@ export component AppWindow inherits Window {
             emails: root.emails;
             list_entries: root.mail_list_entries;
             group_mail_by_date: root.group_mail_by_date;
-            thread_messages: root.thread_messages;
-            selected_thread_index: root.selected_thread_index;
             sidebar_rows: root.sidebar_rows;
             mail_profiles: root.mail_profiles;
             profiles-in-sidebar: !root.top-bar && !root.compact-layout;
@@ -2033,12 +2093,6 @@ export component AppWindow inherits Window {
                 root.new_profile_requested = true;
             }
             folder_filter_query <=> root.folder_filter_query;
-            mail_labels: root.mail_labels;
-            mail_label_results: root.mail_label_results;
-            selected_mail_label_count: root.selected_mail_label_count;
-            selected_account_uses_labels: root.selected_account_uses_labels;
-            email_tiles: root.email_tiles;
-            email_links: root.email_links;
             active_view: root.active_view;
             selected_scope: root.selected_scope;
             selected_scope_title: root.display_scope_title;
@@ -2049,22 +2103,6 @@ export component AppWindow inherits Window {
             mail_oldest_first: root.mail_oldest_first;
             mail_compact_rows: root.mail_compact_rows;
             mail_preview_lines: root.mail_preview_lines;
-            selected_sender: root.selected_sender;
-            selected_address: root.selected_address;
-            selected_subject: root.selected_subject;
-            selected_time: root.selected_time;
-            selected_to: root.selected_to;
-            selected_label: root.selected_label;
-            selected_is_draft: root.selected_is_draft;
-            selected_initials: root.selected_initials;
-            selected_favicon: root.selected_favicon;
-            selected_has_favicon: root.selected_has_favicon;
-            selected_plain_text: root.selected_plain_text;
-            selected_source: root.selected_source;
-            selected_text: root.selected_text;
-            has_selection: root.has_selection;
-            clipboard_request: root.clipboard_request;
-            clipboard_request_id: root.clipboard_request_id;
             sync_in_progress: root.sync_in_progress;
             account_problem: root.account_problem;
             can_load_more: root.can_load_more;
@@ -2074,22 +2112,14 @@ export component AppWindow inherits Window {
             has_selected: root.startup_ready && root.has_selected;
             previous-email-id: root.previous_email_id;
             next-email-id: root.next_email_id;
-            selected_starred: root.selected_starred;
-            selected_unread: root.selected_unread;
-            selected_sender_verification: root.selected_sender_verification;
-            remote-images-blocked: root.remote-images-blocked;
             monochrome_sidebar_icons: root.monochrome_sidebar_icons;
             print_supported: root.print_supported;
             mail_sidebar_collapsed <=> root.mail_sidebar_collapsed;
-            text_mode <=> root.text_mode;
-            source_mode <=> root.source_mode;
-            rendering_info_open <=> root.rendering_info_open;
-            email-content-aspect <=> root.email-content-aspect;
-            email-scroll-y <=> root.email-scroll-y;
             open-settings(page) => {
                 root.settings_tab = page;
                 root.open-settings();
             }
+            show-settings => { root.open-settings(); }
             settings_sign_in_account <=> root.settings-sign-in-account;
             settings_open_account <=> root.settings-open-account;
             accent: root.accent;
@@ -2125,6 +2155,7 @@ export component AppWindow inherits Window {
             }
             request_folder_rename(id, name) => { root.open-folder-rename(id, name); }
             request_folder_delete(id, name) => { root.open-folder-delete(id, name); }
+            request_folder_hide(id) => { root.hide_folder(id); }
             request_label_rename(id, name, color, account, global) => { root.open-label-rename(id, name, color, account, global); }
             request_label_delete(id, name, account, global, has-descendants) => {
                 root.open-label-delete(id, name, account, global, has-descendants);
@@ -2166,16 +2197,7 @@ export component AppWindow inherits Window {
             open_message_in_browser => { root.open_message_in_browser(); }
             open_compose => { root.open_compose(""); }
             open_email_link(url) => { root.open_email_link(url); }
-            copy_email_status(status) => { root.copy_email_status(status); }
             report_rendering_issue => { root.report_rendering_issue(); }
-            email-pointer-event(x, y, kind, control, shift, alt, meta) => {
-                root.email-pointer-event(x, y, kind, control, shift, alt, meta);
-            }
-            email-scroll(offset, viewport-height) => { root.email-scroll(offset, viewport-height); }
-            email-key-event(text, pressed, repeat, control, shift, alt, meta) => {
-                root.email-key-event(text, pressed, repeat, control, shift, alt, meta);
-            }
-            select-email-text => { root.select-email-text(); }
             load-remote-images-for-message => { root.load-remote-images-for-message(); }
         }
         }
@@ -2187,6 +2209,8 @@ export component AppWindow inherits Window {
             available-height: parent.height;
 
         FunctionalCalendarView {
+            init => { root.calendar-dialog = self.dialog-area; }
+            changed dialog-area => { root.calendar-dialog = self.dialog-area; }
             active: root.active_view == "calendar";
             x: 0px;
             y: 0px;
@@ -2356,6 +2380,8 @@ export component AppWindow inherits Window {
             available-width: parent.width;
             available-height: parent.height;
             files-view := FilesView {
+                init => { root.files-dialog = self.dialog-area; }
+                changed dialog-area => { root.files-dialog = self.dialog-area; }
                 active: root.active_view == "files";
                 width: parent.width;
                 height: parent.height;
@@ -2365,6 +2391,7 @@ export component AppWindow inherits Window {
                 list-pane-width <=> root.workspace_list_pane_width;
                 account-model: root.connected_accounts;
                 list-pane-width-committed(width) => { root.save_workspace_list_pane_width(width); }
+                show-settings => { root.open-settings(); }
             }
         }
 
@@ -2375,6 +2402,8 @@ export component AppWindow inherits Window {
             available-height: parent.height;
 
         SettingsDialog {
+            init => { root.settings-dialog = self.dialog-area; }
+            changed dialog-area => { root.settings-dialog = self.dialog-area; }
             compact: root.compact-layout;
             x: 0px;
             y: 0px;
@@ -2451,6 +2480,7 @@ export component AppWindow inherits Window {
             sync_interval_minutes <=> root.sync_interval_minutes;
             undo_send_seconds <=> root.undo_send_seconds;
             compose_font <=> root.compose_font;
+            compose_in_window <=> root.compose_in_window;
             compose_text_size <=> root.compose_text_size;
             mark_read <=> root.mark_read;
             collect_outgoing_contacts <=> root.collect_outgoing_contacts;
@@ -2479,6 +2509,7 @@ export component AppWindow inherits Window {
             carddav_username <=> root.carddav_username;
             carddav_password <=> root.carddav_password;
             carddav_manage_existing <=> root.carddav_manage_existing;
+            carddav_connecting: root.carddav_connecting;
             incoming_security <=> root.incoming_security;
             smtp_security <=> root.smtp_security;
             trusted_certificate_pem <=> root.trusted_certificate_pem;
@@ -2563,6 +2594,7 @@ export component AppWindow inherits Window {
             save_sync_interval(minutes) => { root.save_sync_interval(minutes); }
             save_undo_send(seconds) => { root.save_undo_send(seconds); }
             save_compose_text_style(font, size) => { root.save_compose_text_style(font, size); }
+            save_compose_in_window(enabled) => { root.save_compose_in_window(enabled); }
             save_mark_read(choice) => { root.save_mark_read(choice); }
             save_group_mail_by_date(enabled) => { root.save_group_mail_by_date(enabled); }
             save_conversation_view(enabled) => { root.save_conversation_view(enabled); }
@@ -2584,6 +2616,11 @@ export component AppWindow inherits Window {
             cancel_oauth => { root.cancel_oauth(); }
             save_oauth_app(google-id, google-secret, microsoft-id) => {
                 root.save_oauth_app(google-id, google-secret, microsoft-id);
+            }
+            oauth-setup-open <=> root.oauth_setup_open;
+            oauth-settings-error <=> root.oauth_settings_error;
+            save-oauth-apps(google-id, google-secret, microsoft-id) => {
+                root.save_oauth_apps(google-id, google-secret, microsoft-id);
             }
             set-remote-images(enabled) => { root.set-remote-images(enabled); }
             make_account_transfer(value) => root.make_account_transfer(value);
@@ -2638,7 +2675,6 @@ export component AppWindow inherits Window {
             accent-color: root.accent;
             accent-background: root.accent-soft;
             muted-color: root.muted-text;
-            open-settings => { root.toggle-settings(); }
             select-view(view) => { root.active_view = view; }
         }
 
@@ -2650,7 +2686,7 @@ export component AppWindow inherits Window {
             height: parent.height;
             live-workspace: root.active_view;
             live-title: root.active_view != "mail" ? ""
-                : root.has_selected && root.selected_subject != "" ? root.selected_subject
+                : root.has_selected && ReaderUi.selected_subject != "" ? ReaderUi.selected_subject
                 : root.display_scope_title;
         }
 
@@ -2660,7 +2696,6 @@ export component AppWindow inherits Window {
             y: 0px;
             width: parent.width;
             height: parent.height;
-            dark-mode: root.dark-mode;
             accent: root.accent;
             border: root.border;
             border-subtle: root.border-subtle;
@@ -2684,9 +2719,14 @@ export component AppWindow inherits Window {
         // A message on its way out, with a way to take it back. A phone's
         // composer covers the window, so it waits for that to close.
         if Notice.shown && !(root.compact-layout && ComposerUi.open) : NoticeToast {
+            // While a view's dialog is open, the notice centers on the
+            // dialog's area, so the window backdrop never cuts across it.
+            private property <bool> over-view-dialog: root.view-dialog.open && !root.window-dialog-open;
+            private property <length> room-x: self.over-view-dialog ? root.view-dialog.x - root.content-x : 0px;
+            private property <length> room-width: self.over-view-dialog ? root.view-dialog.width : parent.width;
             text: I18n.ui-message(Notice.message.key, Notice.message.argument, Notice.message.second_argument, Notice.message.third_argument);
-            width: min(parent.width - 32px, min(560px, max(320px, self.preferred-width)));
-            x: (parent.width - self.width) / 2;
+            width: min(self.room-width - 32px, min(560px, max(320px, self.preferred-width)));
+            x: self.room-x + (self.room-width - self.width) / 2;
             // Above the phone's navigation, and above the compose button
             // where it shows.
             y: parent.height - self.height - 20px
@@ -2774,6 +2814,14 @@ export component AppWindow inherits Window {
     }
 
     if BlockSender.stage != "" : BlockSenderDialog {
+        x: root.content-x;
+        y: root.content-y;
+        width: root.content-width;
+        height: root.content-height;
+        z: 16000;
+    }
+
+    if ContactImport.stage != "" : ContactImportDialog {
         x: root.content-x;
         y: root.content-y;
         width: root.content-width;
@@ -3049,6 +3097,11 @@ export component AppWindow inherits Window {
             root.welcome-join = true;
             SyncUi.join-method = method;
             SyncUi.dialog = "join";
+            if method == "qr" {
+                SyncUi.join-show-qr();
+            } else if method == "scan" {
+                SyncUi.scan();
+            }
         }
         import-accounts => { root.import_accounts(); }
         privacy-policy-url: root.privacy-policy-url;
@@ -3192,7 +3245,7 @@ export component AppWindow inherits Window {
         // open conversation or mailbox.
         live-workspace: root.active_view;
         live-title: root.active_view != "mail" ? ""
-            : root.has_selected && root.selected_subject != "" ? root.selected_subject
+            : root.has_selected && ReaderUi.selected_subject != "" ? ReaderUi.selected_subject
             : root.display_scope_title;
         background-color: root.tab-strip-bg;
         // The active tab opens into what lies under the strip: the raised
@@ -3216,6 +3269,19 @@ export component AppWindow inherits Window {
             root.settings_tab = "Accounts";
             root.open-settings();
         }
+    }
+
+    // Above the top bar and every dialog layer, below the action help and the
+    // window controls, which stay usable.
+    if root.dialog-open : WindowBackdrop {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        z: 45000;
+        area: root.dialog-area;
+        band-y: root.safe-area-insets.top;
+        band-height: WindowChrome.controls-visible ? WindowChrome.band-height : 0px;
     }
 
     // Action help, above the panes and dialogs.

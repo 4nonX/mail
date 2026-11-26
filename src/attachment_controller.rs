@@ -1,12 +1,13 @@
 //! Mail attachment metadata and an independent dialog session. Files and Mail
 //! share bounded decoders/PDF workers; opening Mail never changes Files state.
 use crate::document_preview::{Preview, image_thumbnail, preview};
+use crate::reader_host::{ReaderKey, ReaderRef};
 use crate::{
-    AppWindow, EmailReader, InboxState, ListAttachment, MailAttachment, MailAttachments,
-    mail::MailMessage,
+    EmailReader, InboxState, ListAttachment, MailAttachment, MailAttachments, mail::MailMessage,
 };
-use slint::{ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use slint::{Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::HashSet,
     rc::Rc,
@@ -15,6 +16,18 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+
+thread_local! {
+    /// The file name of a message forwarded without a name or a subject to
+    /// name it by, in the UI language.
+    static UNNAMED_MESSAGE: RefCell<Rc<str>> = RefCell::new(Rc::from("Forwarded message.eml"));
+}
+
+/// The UI language changed: a forwarded message without a name of its own
+/// or a subject is a file called `words` (#455).
+pub(crate) fn set_unnamed_message(words: &str) {
+    UNNAMED_MESSAGE.with(|name| *name.borrow_mut() = Rc::from(format!("{words}.eml")));
+}
 
 #[cfg(mobile)]
 static SUSPEND: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
@@ -25,14 +38,14 @@ pub(crate) fn suspend() {
     }
 }
 
-pub(crate) fn clear(app: &AppWindow) {
-    let ui = app.global::<MailAttachments>();
+pub(crate) fn clear(reader: &ReaderRef) {
+    let ui = reader.global::<MailAttachments>();
     ui.invoke_command("close".into(), "".into());
     ui.set_rows(ModelRc::default());
 }
-pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
+pub(crate) fn project(reader: &ReaderRef, email: &MailMessage, same: bool) {
     let previous = same.then(|| {
-        let rows = app.global::<MailAttachments>().get_rows();
+        let rows = reader.global::<MailAttachments>().get_rows();
         (0..rows.row_count())
             .filter_map(|index| rows.row_data(index))
             .filter(|row| row.has_thumbnail)
@@ -40,7 +53,7 @@ pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
             .collect::<std::collections::HashMap<_, _>>()
     });
     if !same {
-        clear(app);
+        clear(reader);
     }
     let mut rows = attachment_rows(&email.attachments);
     if let Some(previous) = previous {
@@ -52,11 +65,10 @@ pub(crate) fn project(app: &AppWindow, email: &MailMessage, same: bool) {
         }
     }
     let thumbnail_ids = thumbnail_ids(&email.attachments, &rows);
-    app.global::<MailAttachments>()
-        .set_rows(ModelRc::new(VecModel::from(rows)));
+    let ui = reader.global::<MailAttachments>();
+    ui.set_rows(ModelRc::new(VecModel::from(rows)));
     for id in thumbnail_ids {
-        app.global::<MailAttachments>()
-            .invoke_command("thumbnail".into(), id);
+        ui.invoke_command("thumbnail".into(), id);
     }
 }
 
@@ -66,6 +78,16 @@ fn visible_attachment(attachment: &flectar_mail_core::models::AttachmentMeta) ->
             .filename
             .as_ref()
             .is_some_and(|name| !name.trim().is_empty())
+        // A message forwarded inside this one is a file as well as what the
+        // body shows, as mail apps list it (#455).
+        || is_message(attachment)
+}
+
+fn is_message(attachment: &flectar_mail_core::models::AttachmentMeta) -> bool {
+    attachment
+        .mime_type
+        .as_deref()
+        .is_some_and(flectar_mail_core::mime::is_message_type)
 }
 
 // attachment_rows preserves this filtered metadata order. Walk the two in
@@ -134,9 +156,9 @@ fn attachment_rows(
             let media = media_type(a);
             MailAttachment {
                 id: a.id.to_string().into(),
-                name: name.into(),
-                previewable: previewable(name, &media),
-                kind: file_kind(name, &media).into(),
+                name: name.as_ref().into(),
+                previewable: previewable(&name, &media),
+                kind: file_kind(&name, &media).into(),
                 detail: media.into(),
                 thumbnail: Default::default(),
                 has_thumbnail: false,
@@ -151,22 +173,24 @@ pub(crate) fn list_attachment(
 ) -> ListAttachment {
     let name = file_name(attachment);
     let media = media_type(attachment);
-    let (stem, extension) = split_extension(name);
+    let (stem, extension) = split_extension(&name);
     ListAttachment {
         id: attachment.id.to_string().into(),
         stem: stem.into(),
         extension: extension.into(),
-        kind: file_kind(name, &media).into(),
-        previewable: previewable(name, &media),
+        kind: file_kind(&name, &media).into(),
+        previewable: previewable(&name, &media),
     }
 }
 
-fn file_name(attachment: &flectar_mail_core::models::AttachmentMeta) -> &str {
-    attachment
-        .filename
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("attachment")
+fn file_name(attachment: &flectar_mail_core::models::AttachmentMeta) -> Cow<'_, str> {
+    match attachment.filename.as_deref().filter(|s| !s.is_empty()) {
+        Some(name) => Cow::Borrowed(name),
+        None if is_message(attachment) => {
+            Cow::Owned(UNNAMED_MESSAGE.with(|name| name.borrow().to_string()))
+        }
+        None => Cow::Borrowed("attachment"),
+    }
 }
 
 fn media_type(attachment: &flectar_mail_core::models::AttachmentMeta) -> String {
@@ -182,14 +206,10 @@ fn media_type(attachment: &flectar_mail_core::models::AttachmentMeta) -> String 
 }
 
 fn previewable(name: &str, media: &str) -> bool {
-    media == "application/pdf"
+    crate::document_preview::declared_pdf(media, name)
         || media.starts_with("image/")
         || media.starts_with("text/")
         || matches!(media, "application/json" | "application/xml")
-        || name
-            .as_bytes()
-            .get(name.len().saturating_sub(4)..)
-            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".pdf"))
 }
 
 /// A name and its extension, such as "Report" and ".pdf". Only a short
@@ -208,8 +228,8 @@ fn split_extension(name: &str) -> (&str, &str) {
 }
 
 /// What a file is, by its type and otherwise its name: pdf, document,
-/// spreadsheet, presentation, image, video, audio, archive, code, calendar
-/// or file. It picks the file's icon.
+/// spreadsheet, presentation, image, video, audio, archive, code, calendar,
+/// message or file. It picks the file's icon.
 fn file_kind(name: &str, media: &str) -> &'static str {
     let extension = split_extension(name)
         .1
@@ -222,6 +242,8 @@ fn file_kind(name: &str, media: &str) -> &'static str {
     };
     if is(&["application/pdf"], &["pdf"], &[]) {
         "pdf"
+    } else if is(&["message/rfc822", "message/global"], &["eml"], &[]) {
+        "message"
     } else if is(
         &[],
         &[
@@ -365,8 +387,11 @@ fn close(ui: &MailAttachments<'_>, generation: &AtomicU64, session: &RefCell<Ses
     ui.set_is_image(false);
 }
 
+/// Attachments for a reader: the files of the message it shows, their
+/// thumbnails, and the dialog that previews one. Each reader's window has its
+/// own, so a preview in one doesn't close another's.
 pub(crate) fn register(
-    app: &AppWindow,
+    reader: &ReaderRef,
     inbox: &Rc<RefCell<InboxState>>,
     runtime: &tokio::runtime::Handle,
     documents: Arc<dyn crate::documents::DocumentProvider>,
@@ -377,10 +402,12 @@ pub(crate) fn register(
         selected: None,
     }));
     let generation = Arc::new(AtomicU64::new(0));
-    let weak = app.as_weak();
+    let host = reader.host();
+    let key = reader.key();
     #[cfg(mobile)]
     {
-        let weak = weak.clone();
+        use slint::ComponentHandle;
+        let weak = reader.app().as_weak();
         let _ = SUSPEND.set(Box::new(move || {
             let _ = weak.upgrade_in_event_loop(|app| {
                 app.global::<MailAttachments>()
@@ -394,18 +421,18 @@ pub(crate) fn register(
     let timer = slint::Timer::default();
     let state = inbox.clone();
     let observed = context.clone();
-    let window = weak.clone();
+    let window = host.clone();
     timer.start(
         slint::TimerMode::Repeated,
         std::time::Duration::from_millis(100),
         move || {
-            let Some(app) = window.upgrade() else {
+            let Some(reader) = window.upgrade() else {
                 return;
             };
             let current = state.borrow().core.as_ref().map(|core| {
                 (
                     core.file_core(),
-                    app.global::<EmailReader>().get_message_id(),
+                    reader.global::<EmailReader>().get_message_id(),
                 )
             });
             let changed = match (&*observed.borrow(), &current) {
@@ -414,7 +441,8 @@ pub(crate) fn register(
                 _ => true,
             };
             if changed {
-                app.global::<MailAttachments>()
+                reader
+                    .global::<MailAttachments>()
                     .invoke_command("close".into(), "".into());
                 *observed.borrow_mut() = current;
             }
@@ -437,7 +465,7 @@ pub(crate) fn register(
         flectar_mail_core::models::AttachmentMeta,
         Arc<flectar_mail_core::Core>,
     )>(8);
-    let thumbnail_window = weak.clone();
+    let thumbnail_window = host.clone();
     runtime.spawn(async move {
         while let Some((message, attachment, core)) = thumbnail_job_receiver.recv().await {
             let attachment_id = attachment.id;
@@ -460,8 +488,9 @@ pub(crate) fn register(
             {
                 break;
             }
-            let _ = thumbnail_window
-                .upgrade_in_event_loop(|app| app.global::<MailAttachments>().invoke_deliver());
+            thumbnail_window
+                .clone()
+                .in_event_loop(|reader| reader.global::<MailAttachments>().invoke_deliver());
         }
     });
     let thumbnail_pending = Rc::new(RefCell::new(HashSet::<(usize, i32, i64)>::new()));
@@ -469,15 +498,15 @@ pub(crate) fn register(
     let session_for_delivery = session.clone();
     let current = generation.clone();
     let pending_for_delivery = thumbnail_pending.clone();
-    let window = weak.clone();
-    app.global::<MailAttachments>().on_deliver(move || {
-        let Some(app) = window.upgrade() else {
+    let window = host.clone();
+    reader.global::<MailAttachments>().on_deliver(move || {
+        let Some(reader) = window.upgrade() else {
             return;
         };
         let session = &session_for_delivery;
         while let Ok((revision, message, core, result)) = receiver.try_recv() {
             if current.load(Ordering::SeqCst) != revision
-                || app.global::<EmailReader>().get_message_id() != message
+                || reader.global::<EmailReader>().get_message_id() != message
             {
                 continue;
             }
@@ -491,7 +520,7 @@ pub(crate) fn register(
                 continue;
             }
 
-            let ui = app.global::<MailAttachments>();
+            let ui = reader.global::<MailAttachments>();
             ui.set_busy(false);
             match result {
                 Ok(Some(Preview::Pdf(data, page))) => {
@@ -523,7 +552,7 @@ pub(crate) fn register(
             pending_for_delivery
                 .borrow_mut()
                 .remove(&(core_id, message, attachment_id));
-            if app.global::<EmailReader>().get_message_id() != message
+            if reader.global::<EmailReader>().get_message_id() != message
                 || !state
                     .borrow()
                     .core
@@ -535,7 +564,7 @@ pub(crate) fn register(
             let Ok((pixels, width, height)) = result else {
                 continue;
             };
-            let rows = app.global::<MailAttachments>().get_rows();
+            let rows = reader.global::<MailAttachments>().get_rows();
             let attachment_id = attachment_id.to_string();
             for index in 0..rows.row_count() {
                 let Some(mut row) = rows.row_data(index) else {
@@ -556,13 +585,14 @@ pub(crate) fn register(
     let state = inbox.clone();
     let handle = runtime.clone();
     let pending_thumbnails = thumbnail_pending.clone();
-    app.global::<MailAttachments>()
+    reader
+        .global::<MailAttachments>()
         .on_command(move |action, value| {
             let _keep_timer = &timer;
-            let Some(app) = weak.upgrade() else {
+            let Some(reader) = host.upgrade() else {
                 return;
             };
-            let ui = app.global::<MailAttachments>();
+            let ui = reader.global::<MailAttachments>();
             if action == "close" {
                 close(&ui, &generation, &session);
                 return;
@@ -570,7 +600,7 @@ pub(crate) fn register(
             let Some(core) = state.borrow().core.as_ref().map(|core| core.file_core()) else {
                 return;
             };
-            let message = app.global::<EmailReader>().get_message_id();
+            let message = reader.global::<EmailReader>().get_message_id();
             // A profile switch may happen before the lifecycle timer's next
             // tick. Never use a retained attachment ID with a different Core.
             if (action == "page" || action == "download-current")
@@ -589,23 +619,34 @@ pub(crate) fn register(
                 session.borrow().selected.clone()
             } else {
                 value.parse::<i64>().ok().and_then(|id| {
-                    let state = state.borrow();
                     if listed {
-                        state
+                        return state
+                            .borrow()
                             .messages
                             .iter()
                             .filter_map(|m| m.first_attachment.as_ref())
                             .find(|a| a.id == id)
-                            .cloned()
-                    } else {
-                        state
-                            .conversation_messages
-                            .iter()
-                            .chain(state.messages.iter())
-                            .find(|m| m.id == message)
-                            .and_then(|m| m.attachments.iter().find(|a| a.id == id))
-                            .cloned()
+                            .cloned();
                     }
+                    let attachment =
+                        |m: &MailMessage| m.attachments.iter().find(|a| a.id == id).cloned();
+                    crate::reader_host::kept_message(&state, key, message)
+                        .as_ref()
+                        .and_then(attachment)
+                        // The main window's reader shows a list row until its
+                        // conversation is here.
+                        .or_else(|| {
+                            (key == ReaderKey::Main)
+                                .then(|| {
+                                    let state = state.borrow();
+                                    state
+                                        .messages
+                                        .iter()
+                                        .find(|m| m.id == message)
+                                        .and_then(attachment)
+                                })
+                                .flatten()
+                        })
                 })
             };
             let Some(selected) = selected else {
@@ -670,7 +711,7 @@ pub(crate) fn register(
             ui.set_open(true);
             ui.set_busy(true);
             ui.set_status("".into());
-            let weak = weak.clone();
+            let window = host.clone();
             let sender = sender.clone();
             let documents = documents.clone();
             let task = handle.spawn(async move {
@@ -721,14 +762,15 @@ pub(crate) fn register(
                             .mime_type
                             .as_deref()
                             .unwrap_or("application/octet-stream"),
+                        selected.filename.as_deref().unwrap_or(""),
                     )
                     .await
                     .map(Some)
                 }
                 .await;
                 if sender.send((revision, message, core, result)).await.is_ok() {
-                    let _ = weak.upgrade_in_event_loop(|app| {
-                        app.global::<MailAttachments>().invoke_deliver()
+                    window.in_event_loop(|reader| {
+                        reader.global::<MailAttachments>().invoke_deliver()
                     });
                 }
             });
@@ -795,6 +837,9 @@ mod tests {
             ("book.epub", "application/epub+zip", "document"),
             ("site.zip", "application/zip", "archive"),
             ("invite.ics", "text/calendar", "calendar"),
+            ("Original message.eml", "message/rfc822", "message"),
+            ("thread.EML", "application/octet-stream", "message"),
+            ("Forwarded message.eml", "message/global", "message"),
             ("clip.mov", "video/quicktime", "video"),
             ("memo.m4a", "", "audio"),
             ("config.json", "application/json", "code"),
@@ -876,5 +921,33 @@ mod tests {
         assert!(!thumbnail_candidate(&files[0]));
         assert!(thumbnail_candidate(&files[1]));
         assert!(!rows[1].has_thumbnail);
+    }
+
+    /// A message forwarded inside another shows in the body and is a file
+    /// too, named by its subject or else as the UI language says (#455).
+    #[test]
+    fn issue_455_a_forwarded_message_is_listed_as_a_file() {
+        use flectar_mail_core::models::AttachmentMeta;
+        let message = |id, filename: Option<&str>| AttachmentMeta {
+            id,
+            filename: filename.map(str::to_owned),
+            mime_type: Some("message/rfc822".into()),
+            size: Some(300),
+            is_inline: true,
+        };
+        set_unnamed_message("Mensaje reenviado");
+        let rows = attachment_rows(&[message(1, Some("Original message.eml")), message(2, None)]);
+        set_unnamed_message("Forwarded message");
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.kind.as_str(), row.previewable))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Original message.eml", "message", false),
+                ("Mensaje reenviado.eml", "message", false),
+            ]
+        );
     }
 }

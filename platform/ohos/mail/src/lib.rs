@@ -23,7 +23,9 @@ use flectar_mail::flectar_mail_core::error::{CoreError, Result as CoreResult};
 use slint_ohos_backend::ffi::{self, napi_env, napi_value};
 
 mod bridge;
+mod device;
 mod documents;
+mod proxy;
 
 /// NAPI module name; must match the XComponent `libraryname` in the ArkTS page
 /// (the loader resolves it to `libflectar_mail_ohos.so`).
@@ -270,6 +272,25 @@ fn configure_native_libraries() -> std::result::Result<(), String> {
     flectar_mail::platform::configure_pdfium(directory.to_path_buf())
 }
 
+/// Scans with Scan Kit's scanner through the page (`bridge::scan_qr`), which
+/// needs no camera permission.
+struct PageQrScanner;
+
+impl flectar_mail::QrScannerHost for PageQrScanner {
+    fn available(&self) -> bool {
+        device::scans_qr()
+    }
+
+    /// Scan Kit's scanner has words of its own.
+    fn scan(&self, _texts: flectar_mail::ScanTexts) -> flectar_mail::ScanFuture {
+        Box::pin(async {
+            bridge::scan_qr()
+                .await
+                .map_err(flectar_mail::ScanError::Unavailable)
+        })
+    }
+}
+
 /// Runs on the Slint thread spawned by the backend.
 fn run_mail() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Application stderr is not reliably visible on device; route panics to
@@ -322,12 +343,17 @@ fn run_mail() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync
         flectar_mail::PlatformContext::app_private(internal, cache, documents, credentials, oauth);
     platform.external_urls = flectar_mail::ExternalUrlOpener::new(bridge::open_url);
     platform.notifications = Some(Arc::new(PageNotifications));
+    platform.qr_scanner = Some(Arc::new(PageQrScanner));
     platform.privacy_consent = flectar_mail::PrivacyConsent::new(bridge::withdraw_privacy_consent);
     let app_language = flectar_mail::AppLanguage::new(|mode, selected| {
         let _ = bridge::set_app_language(mode, selected);
     });
     bridge::install_app_language(app_language.clone());
     platform.app_language = app_language;
+    // Flectar Mail Sync lists this device by its market name.
+    if let Some(name) = device::name() {
+        flectar_mail::platform::configure_device_name(&name);
+    }
     // Mail content and the composer fall back to the same system faces as the
     // Slint UI the backend set up.
     flectar_mail::platform::configure_email_fonts(flectar_mail::platform::EmailFonts {
@@ -335,6 +361,9 @@ fn run_mail() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync
         han_families: &slint_ohos_backend::fonts::HAN_FAMILIES,
         fallback_scripts: &slint_ohos_backend::fonts::FALLBACK_SCRIPTS,
     });
+    // Read the system HTTP proxy before the first connection; the shared
+    // network layer applies it to HTTP(S) traffic.
+    proxy::install();
     slint_ohos_backend::ohos_info!("mail: entering flectar_mail::run");
     flectar_mail::run(platform).map_err(|err| err.to_string())?;
     Ok(())

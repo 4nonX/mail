@@ -43,6 +43,12 @@ pub(crate) fn set_taskbar_badge(badge: Option<(u32, String)>) {
     windows::set_taskbar_badge(badge);
 }
 
+/// The main window, while it exists.
+#[cfg(target_os = "windows")]
+pub(crate) fn main_window() -> Option<windows_sys::Win32::Foundation::HWND> {
+    windows::main_window()
+}
+
 /// The integrated frame is the default; unknown saved values fall back to the
 /// system frame so a window can never start without any controls.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,14 +101,14 @@ pub(crate) const PLATFORM: &str = if cfg!(target_os = "windows") {
 
 thread_local! {
     static STARTUP_FRAME: Cell<WindowFrame> = const { Cell::new(WindowFrame::System) };
-    /// Set while a composer window is being created.
+    /// Set while a composer's or a conversation's window is being created.
     #[cfg(desktop)]
     static CREATING_COMPOSER: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Native window attributes for the main window, applied by the backend
-/// selector before the window is created. Composer windows keep the
-/// platform's own frame.
+/// selector before the window is created. Composer and conversation windows
+/// keep the platform's own frame.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[cfg_attr(target_os = "windows", allow(unused_variables))]
 pub(crate) fn window_attributes(
@@ -122,11 +128,12 @@ pub(crate) fn window_attributes(
     }
 }
 
-/// Create a composer window. The winit backend applies the attributes hook
-/// while the component creates its window, so the hook can tell the two
-/// kinds apart: only the main window gets the integrated frame.
+/// Create a window other than the main one: a composer's or a
+/// conversation's. The winit backend applies the attributes hook while the
+/// component creates its window, so the hook can tell them apart: only the
+/// main window gets the integrated frame.
 #[cfg(desktop)]
-pub(crate) fn composer_window<T>(
+pub(crate) fn secondary_window<T>(
     create: impl FnOnce() -> Result<T, slint::PlatformError>,
 ) -> Result<T, slint::PlatformError> {
     CREATING_COMPOSER.set(true);
@@ -263,11 +270,13 @@ fn register_desktop_events(app: &AppWindow) {
             }
             // Tab shortcuts work wherever focus is, as in a browser, except in
             // the composer and the calendar editor, which keep their keys.
+            // Like the dimmed tabs, they wait while a dialog is open.
             winit::event::WindowEvent::KeyboardInput { event, .. }
                 if event.state.is_pressed()
                     && app.global::<crate::TabsUi>().get_enabled()
                     && !app.global::<crate::ComposerUi>().get_open()
-                    && !app.get_calendar_editor_shown() =>
+                    && !app.get_calendar_editor_shown()
+                    && !app.get_dialog_open() =>
             {
                 if let Some(command) = crate::tabs::shortcut(&event.logical_key, modifiers.get()) {
                     app.global::<crate::TabsUi>()
@@ -290,7 +299,11 @@ fn register_desktop_events(app: &AppWindow) {
                 macos::refresh(&app);
                 report_minimized(&app);
             }
+            winit::event::WindowEvent::Moved(_) => {
+                crate::window_places::changed(crate::window_places::Kind::Main, &app);
+            }
             winit::event::WindowEvent::Resized(size) => {
+                crate::window_places::changed(crate::window_places::Kind::Main, &app);
                 // AppKit lays the title bar out again on resize and full-screen
                 // transitions, which moves the traffic lights back.
                 #[cfg(target_os = "macos")]

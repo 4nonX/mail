@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::documents::{DocumentDialog, DocumentFuture, DocumentProvider};
+use crate::qr_scanner::is_pairing_code;
 use crate::retained_model::RetainedModel;
 use chrono::{Datelike, Timelike};
 use flectar_mail_core::Core;
@@ -68,14 +69,15 @@ impl SyncController {
         app: &AppWindow,
         state: &Rc<RefCell<InboxState>>,
         runtime: &tokio::runtime::Handle,
-        urls: ExternalUrlOpener,
-        documents: Arc<dyn DocumentProvider>,
-        temp_dir: PathBuf,
+        host: &PlatformContext,
     ) {
         let ui = app.global::<SyncUi>();
         ui.set_devices(Rc::clone(&self.devices).into());
         ui.set_can_buy(platform::sells_sync());
+        let scanner = host.qr_scanner.clone();
+        ui.set_can_scan(scanner.as_ref().is_some_and(|scanner| scanner.available()));
 
+        let temp_dir = host.paths.temp_dir();
         let staging = temp_dir.clone();
         runtime.spawn_blocking(move || remove_staged_recovery_codes(&staging));
 
@@ -84,9 +86,10 @@ impl SyncController {
             state: Rc::clone(state),
             runtime: runtime.clone(),
             controller: Rc::clone(self),
-            urls,
-            documents,
+            urls: host.external_urls.clone(),
+            documents: host.documents.clone(),
             temp_dir,
+            scanner,
         };
 
         let turn_on = actions.clone();
@@ -95,6 +98,8 @@ impl SyncController {
         ui.on_join_with_code(move |code| join.join_with_code(code.to_string()));
         let show = actions.clone();
         ui.on_join_show_qr(move || show.join_show_qr());
+        let scan = actions.clone();
+        ui.on_scan(move || scan.scan());
         let recover = actions.clone();
         ui.on_recover(move |words| recover.recover(words.to_string()));
         let invite = actions.clone();
@@ -118,6 +123,8 @@ impl SyncController {
         ui.on_delete_everywhere(move || delete.delete_everywhere());
         let sign_ins = actions.clone();
         ui.on_set_sync_sign_ins(move |on| sign_ins.set_sync_sign_ins(on));
+        let share = actions.clone();
+        ui.on_share_sign_ins(move || share.share_sign_ins());
         let opened = actions.clone();
         ui.on_opened(move || opened.opened());
         let subscribe = actions.clone();
@@ -148,7 +155,6 @@ impl SyncController {
         state: &Rc<RefCell<InboxState>>,
         runtime: &tokio::runtime::Handle,
         ui_tasks: &UiSender<UiTaskUpdate>,
-        calendar_month: NaiveDate,
         updates: DeviceSyncUpdates,
     ) {
         if let Some(status) = updates.status {
@@ -164,14 +170,7 @@ impl SyncController {
             crate::block_sender::reload();
         }
         if updates.accounts_changed || updates.accounts_reread {
-            reload_accounts(
-                state,
-                runtime,
-                ui_tasks,
-                calendar_month,
-                updates.removed_accounts,
-                updates.accounts_changed,
-            );
+            reload_accounts(state, runtime, ui_tasks, updates.accounts_changed);
         }
     }
 
@@ -192,6 +191,8 @@ impl SyncController {
         ui.set_last_synced(last_synced.into());
         ui.set_last_synced_today(today);
         ui.set_server_url(status.server_url.as_deref().unwrap_or_default().into());
+        ui.set_held_sign_ins(status.held_sign_ins);
+        ui.set_synced_accounts(status.synced_accounts.join(", ").into());
         self.devices.reconcile_by(
             status
                 .devices
@@ -299,6 +300,8 @@ struct Actions {
     /// Where a file to save is written first, below the cache directory,
     /// which every document provider accepts as an export source.
     temp_dir: PathBuf,
+    /// The phone's QR code scanner; computers have none.
+    scanner: Option<Arc<dyn QrScannerHost>>,
 }
 
 impl Actions {
@@ -410,6 +413,110 @@ impl Actions {
             async move { core.device_sync_join_show_code(server).await },
             move |ui, controller, result| {
                 show_code(ui, controller, attempt, result, &cancel);
+            },
+        );
+    }
+
+    /// Scan another device's QR code: to join its sync from Connect this
+    /// device, or, from Add a device, to add the device that shows it.
+    fn scan(&self) {
+        let (Some(app), Some(scanner)) = (self.app.upgrade(), self.scanner.clone()) else {
+            return;
+        };
+        let ui = app.global::<SyncUi>();
+        let adding = ui.get_dialog() == "invite";
+        let texts = ScanTexts {
+            hint: ui.get_scan_hint().into(),
+            close: ui.get_scan_close().into(),
+        };
+        let scan = scanner.scan(texts);
+        let actions = self.clone();
+        self.run(
+            async move { Ok(scan.await) },
+            move |ui, controller, result| match result.unwrap_or(Ok(None)) {
+                Ok(Some(code)) if is_pairing_code(&code) => {
+                    if adding {
+                        actions.answer_code(code);
+                    } else {
+                        actions.join_scanned(code);
+                    }
+                }
+                // Closing the scanner keeps Add a device's own code, and
+                // leaves Connect this device, which had only the scanner.
+                Ok(None) => {
+                    if !adding {
+                        ui.set_dialog("".into());
+                    }
+                }
+                outcome => {
+                    if let (Some(pairing), Some(core)) =
+                        (controller.end_attempt(ui), actions.core())
+                    {
+                        core.device_sync_cancel_pairing(pairing);
+                    }
+                    let stage = match outcome {
+                        Err(ScanError::CameraDenied) => "camera",
+                        Err(ScanError::Unavailable(reason)) => {
+                            tracing::warn!(%reason, "the QR code scanner didn't start");
+                            "scanner"
+                        }
+                        _ => "not-found",
+                    };
+                    ui.set_pairing_stage(stage.into());
+                }
+            },
+        );
+    }
+
+    /// Join with the QR code an existing device shows.
+    fn join_scanned(&self, code: String) {
+        let (Some(app), Some(core)) = (self.app.upgrade(), self.core()) else {
+            return;
+        };
+        let ui = app.global::<SyncUi>();
+        let attempt = self.controller.start_attempt(&ui, "starting");
+        let cancel = Arc::clone(&core);
+        self.run(
+            async move { core.device_sync_join_scanned(code).await },
+            move |ui, controller, result| {
+                if controller.attempt.get() != attempt {
+                    if let Ok(pairing) = result {
+                        cancel.device_sync_cancel_pairing(pairing);
+                    }
+                    return;
+                }
+                match result {
+                    Ok(pairing) => controller.follow(ui, pairing),
+                    Err(error) => show_pairing_error(ui, &error),
+                }
+            },
+        );
+    }
+
+    /// Add the device that shows this QR code, instead of showing one.
+    fn answer_code(&self, code: String) {
+        let (Some(app), Some(core)) = (self.app.upgrade(), self.core()) else {
+            return;
+        };
+        let ui = app.global::<SyncUi>();
+        if let Some(pairing) = self.controller.pairing.get() {
+            core.device_sync_cancel_pairing(pairing);
+        }
+        let attempt = self.controller.start_attempt(&ui, "connecting");
+        let cancel = Arc::clone(&core);
+        self.run(
+            async move { core.device_sync_answer_code(code).await },
+            move |ui, controller, result| {
+                if controller.attempt.get() != attempt {
+                    if let Ok(pairing) = result {
+                        cancel.device_sync_cancel_pairing(pairing);
+                    }
+                    return;
+                }
+                match result {
+                    Ok(pairing) => controller.follow(ui, pairing),
+                    Err(error) => show_pairing_error(ui, &error),
+                }
             },
         );
     }
@@ -595,6 +702,21 @@ impl Actions {
         );
     }
 
+    /// Share the sign-ins of the accounts this device had before it joined,
+    /// as the user asked.
+    fn share_sign_ins(&self) {
+        let Some(core) = self.core() else {
+            return;
+        };
+        self.run(
+            async move { core.device_sync_share_held_sign_ins().await },
+            |ui, _, result| match result {
+                Ok(()) => show_failure(ui, "", ""),
+                Err(error) => show_failure(ui, "sign-ins", &error_text(&error)),
+            },
+        );
+    }
+
     /// The page opened. With sync off, show what Flectar's server charges,
     /// once; with sync on, ask what the group pays, which a payment in the
     /// browser may have changed.
@@ -720,7 +842,8 @@ impl Actions {
 
 /// Open a page of the payment provider; `action` names it if that fails.
 fn open_page(ui: &SyncUi, urls: &ExternalUrlOpener, url: &str, action: &str) {
-    match urls.open_external(url) {
+    // The address comes from the server, so only a web page opens.
+    match urls.open_web_page(url) {
         Ok(()) => show_failure(ui, "", ""),
         Err(error) => show_failure(ui, action, &error),
     }
@@ -1106,6 +1229,7 @@ fn show_preferences(
         .set_policy(settings.read_receipts.as_str().into());
     crate::apply_list_rows(app, settings);
     app.set_compose_font(settings.compose_font.as_str().into());
+    app.set_compose_in_window(settings.compose_in_window);
     app.set_compose_text_size(settings.compose_text_size.as_str().into());
     crate::mail_rules::apply_cleanup(
         app,
@@ -1140,69 +1264,19 @@ fn show_preferences(
     }
 }
 
-/// Another device added, changed or removed accounts. Removed ones leave
-/// the window as a removal here does; the others are listed again.
+/// Another device added or changed accounts: they are listed again. Sync
+/// never removes an account here.
 fn reload_accounts(
     state: &Rc<RefCell<InboxState>>,
     runtime: &tokio::runtime::Handle,
     ui_tasks: &UiSender<UiTaskUpdate>,
-    calendar_month: NaiveDate,
-    removed: Vec<i64>,
     announce: bool,
 ) {
-    let (core, removals) = {
-        let state = state.borrow();
-        let Some(core) = state.core.clone() else {
-            return;
-        };
-        let removals: Vec<_> = removed
-            .into_iter()
-            .filter(|account_id| {
-                state
-                    .connected_accounts
-                    .iter()
-                    .any(|account| account.id == *account_id)
-            })
-            .map(|account_id| {
-                (
-                    account_id,
-                    RemovalView::of(&state, account_id, calendar_month),
-                )
-            })
-            .collect();
-        (core, removals)
+    let Some(core) = state.borrow().core.clone() else {
+        return;
     };
     let updates = ui_tasks.clone();
     runtime.spawn(async move {
-        for (account_id, view) in removals {
-            let accounts = core.load_account_snapshot().await.ok();
-            // A removal that failed leaves the account listed.
-            let removed = accounts.as_ref().is_some_and(|snapshot| {
-                !snapshot
-                    .accounts
-                    .iter()
-                    .any(|account| account.id == account_id)
-            });
-            if !removed {
-                continue;
-            }
-            let removal =
-                read_account_removal(&core, account_id, true, accounts.as_ref(), view).await;
-            let _ = updates
-                .send(UiTaskUpdate {
-                    message: UiMessage::plain("Account removed on another device."),
-                    accounts,
-                    account_removal: Some(removal),
-                    calendar_connections: core.load_calendar_connections().await.ok(),
-                    carddav_connections: core.load_carddav_connections().await.ok(),
-                    calendar_error: None,
-                    clear_account_form: false,
-                    finishes_account_setup: false,
-                    finishes_oauth: false,
-                    close_to_tray: None,
-                })
-                .await;
-        }
         let _ = updates
             .send(UiTaskUpdate {
                 // Read again after lost events, only one from another device

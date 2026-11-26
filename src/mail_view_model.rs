@@ -97,6 +97,8 @@ pub(super) fn carry_selected_detail(
     summary.html = selected_detail.html.take();
     summary.text = selected_detail.text.take();
     summary.to = std::mem::take(&mut selected_detail.to);
+    summary.to_people = std::mem::take(&mut selected_detail.to_people);
+    summary.cc_people = std::mem::take(&mut selected_detail.cc_people);
     summary.attachments = std::mem::take(&mut selected_detail.attachments);
     summary.body_pending = false;
 }
@@ -417,8 +419,8 @@ pub(super) fn render_current(
         state.conversation_messages.clear();
         state.conversation_selected_index = 0;
         state.conversation_rows.set_vec(Vec::new());
-        app.set_email_tiles(Default::default());
-        app.set_email_links(Default::default());
+        app.global::<ReaderUi>().set_email_tiles(Default::default());
+        app.global::<ReaderUi>().set_email_links(Default::default());
         return Ok(());
     }
     // Keep list rows lightweight. SQLite already owns the durable body cache.
@@ -514,10 +516,10 @@ pub(super) fn render_current(
         state.conversation_rows.set_vec(Vec::new());
         drop(state);
         // "View plain text" is a message action, not a global display mode.
-        app.set_text_mode(false);
-        app.set_source_mode(false);
-        crate::message_source::hide(app);
-        app.set_rendering_info_open(false);
+        app.global::<ReaderUi>().set_text_mode(false);
+        app.global::<ReaderUi>().set_source_mode(false);
+        crate::message_source::hide(&ReaderRef::main(app));
+        app.global::<ReaderUi>().set_rendering_info_open(false);
     }
 
     let (
@@ -611,20 +613,24 @@ pub(super) fn render_current(
         visible_count < total_count
     });
     app.set_has_selected(selected_email.is_some());
-    app.set_selected_account_uses_labels(selected_email.as_ref().is_some_and(|email| {
-        state.borrow().connected_accounts.iter().any(|account| {
-            account.id == email.account_id && account.mail_protocol == MailProtocol::Gmail
-        })
-    }));
+    app.global::<ReaderUi>()
+        .set_selected_account_uses_labels(selected_email.as_ref().is_some_and(|email| {
+            state.borrow().connected_accounts.iter().any(|account| {
+                account.id == email.account_id && account.mail_protocol == MailProtocol::Gmail
+            })
+        }));
     app.global::<LocalMailUi>()
         .set_selected(selected_email.as_ref().is_some_and(|email| {
             state.borrow().local_mail.map(|local| local.account_id) == Some(email.account_id)
         }));
-    apply_label_rows(app, &labels, selected_email.as_ref());
+    apply_label_rows(&ReaderRef::main(app), &labels, selected_email.as_ref());
     app.set_previous_email_id(previous_email_id);
     app.set_next_email_id(next_email_id);
     state.borrow().queue_warm_start_update();
     schedule_favicon_fetches(app, state, runtime, &visible_domains);
+    // Conversation windows show the labels the list's rows have now.
+    #[cfg(desktop)]
+    crate::reader_window::list_changed();
 
     if let Some(email) = selected_email {
         let email_id = email.id;
@@ -674,11 +680,12 @@ pub(super) fn render_current(
         if conversation_ready {
             display_email.subject = thread_subject;
         }
-        app.set_selected_thread_index(if conversation_ready {
-            i32::try_from(conversation_selected_index).unwrap_or(i32::MAX)
-        } else {
-            0
-        });
+        app.global::<ReaderUi>()
+            .set_selected_thread_index(if conversation_ready {
+                i32::try_from(conversation_selected_index).unwrap_or(i32::MAX)
+            } else {
+                0
+            });
         if (using_core || display_email.body_pending)
             && (!conversation_ready || display_email.html.is_none())
         {
@@ -689,7 +696,10 @@ pub(super) fn render_current(
                     email_id
                 });
         }
-        apply_selected_favicon(app, favicon_icons.get(&display_email.domain));
+        apply_selected_favicon(
+            &ReaderRef::main(app),
+            favicon_icons.get(&display_email.domain),
+        );
         let reminder = app.global::<ReminderUi>();
         reminder.set_open_remind_time(
             display_email
@@ -701,7 +711,7 @@ pub(super) fn render_current(
         reminder.set_open_due(display_email.reply_reminder_due);
         reminder.set_can_remind(sent_here);
         apply_email(
-            app,
+            &ReaderRef::main(app),
             display_email,
             &email_renderer,
             use_wgpu,
@@ -710,40 +720,47 @@ pub(super) fn render_current(
     } else {
         app.global::<EmailReader>().invoke_ensure_body(-1);
         email_renderer.borrow_mut().clear();
-        app.set_selected_sender("".into());
-        app.set_selected_address("".into());
-        app.set_selected_subject(if query.trim().is_empty() {
-            translated(app, &UiMessage::plain("No conversations in this folder"))
-        } else {
-            translated(app, &UiMessage::plain("No conversations match this search"))
-        });
-        app.set_selected_time("".into());
-        app.set_selected_to("".into());
-        app.set_selected_label("".into());
-        app.set_selected_is_draft(false);
-        app.set_selected_initials("?".into());
-        app.set_selected_starred(false);
-        app.set_selected_unread(false);
-        app.set_selected_sender_verification("".into());
-        apply_selected_favicon(app, None);
-        app.set_email_tiles(ModelRc::new(VecModel::default()));
-        app.set_email_scroll_y(0.0);
-        app.set_email_content_aspect(900.0 / 520.0);
-        app.set_email_links(ModelRc::new(VecModel::default()));
-        clear_reader_projection(app);
-        crate::attachment_controller::clear(app);
-        crate::translation::clear(app);
-        crate::ai_features::clear(app);
+        app.global::<ReaderUi>().set_selected_sender("".into());
+        app.global::<ReaderUi>().set_selected_address("".into());
+        app.global::<ReaderUi>()
+            .set_selected_subject(if query.trim().is_empty() {
+                translated(app, &UiMessage::plain("No conversations in this folder"))
+            } else {
+                translated(app, &UiMessage::plain("No conversations match this search"))
+            });
+        app.global::<ReaderUi>().set_selected_time("".into());
+        app.global::<ReaderUi>().set_selected_to("".into());
+        app.global::<ReaderUi>()
+            .set_selected_details(MessageDetails::default());
+        app.global::<ReaderUi>().set_selected_label("".into());
+        app.global::<ReaderUi>().set_selected_is_draft(false);
+        app.global::<ReaderUi>().set_selected_initials("?".into());
+        app.global::<ReaderUi>().set_selected_starred(false);
+        app.global::<ReaderUi>().set_selected_unread(false);
+        app.global::<ReaderUi>()
+            .set_selected_sender_verification("".into());
+        apply_selected_favicon(&ReaderRef::main(app), None);
+        app.global::<ReaderUi>()
+            .set_email_tiles(ModelRc::new(VecModel::default()));
+        app.global::<ReaderUi>().set_email_scroll_y(0.0);
+        app.global::<ReaderUi>()
+            .set_email_content_aspect(900.0 / 520.0);
+        app.global::<ReaderUi>()
+            .set_email_links(ModelRc::new(VecModel::default()));
+        clear_reader_projection(&ReaderRef::main(app));
+        crate::attachment_controller::clear(&ReaderRef::main(app));
+        crate::translation::clear(&ReaderRef::main(app));
+        crate::ai_features::clear(&ReaderRef::main(app));
         app.global::<EmailReader>().set_message_id(-1);
         app.global::<EmailReader>().set_authored_text("".into());
         app.global::<EmailReader>().set_notice("".into());
-        app.set_selected_plain_text("".into());
-        app.set_selected_source("".into());
-        app.set_selected_text("".into());
-        app.set_has_selection(false);
-        app.set_remote_images_blocked(false);
+        app.global::<ReaderUi>().set_selected_plain_text("".into());
+        app.global::<ReaderUi>().set_selected_source("".into());
+        app.global::<ReaderUi>().set_selected_text("".into());
+        app.global::<ReaderUi>().set_has_selection(false);
+        app.global::<ReaderUi>().set_remote_images_blocked(false);
         state.borrow().conversation_rows.set_vec(Vec::new());
-        app.set_selected_thread_index(0);
+        app.global::<ReaderUi>().set_selected_thread_index(0);
         app.set_render_status(UiMessage::plain(
             "Mail core is ready for account synchronization and message actions.",
         ));
@@ -766,14 +783,14 @@ pub(super) fn select_thread_message(
         }
         state.conversation_selected_index = index;
     }
-    app.set_text_mode(false);
-    app.set_source_mode(false);
-    crate::message_source::hide(app);
-    app.set_rendering_info_open(false);
+    app.global::<ReaderUi>().set_text_mode(false);
+    app.global::<ReaderUi>().set_source_mode(false);
+    crate::message_source::hide(&ReaderRef::main(app));
+    app.global::<ReaderUi>().set_rendering_info_open(false);
     render_current(app, state, runtime)
 }
 
-fn make_thread_rows(
+pub(super) fn make_thread_rows(
     messages: &[MailMessage],
     selected_index: usize,
     favicon_icons: &HashMap<String, FaviconImages>,
@@ -808,7 +825,7 @@ fn make_thread_rows(
 }
 
 pub(super) fn apply_label_rows(
-    app: &AppWindow,
+    host: &ReaderRef,
     labels: &[flectar_mail_core::models::Label],
     selected: Option<&MailMessage>,
 ) {
@@ -816,12 +833,13 @@ pub(super) fn apply_label_rows(
     let chip_rows = selected
         .map(|message| applied_label_rows(labels, &message.labels))
         .unwrap_or_default();
-    app.set_selected_mail_label_count(chip_rows.len() as i32);
+    let ui = host.ui();
+    ui.set_selected_mail_label_count(chip_rows.len() as i32);
     // The header strip must only receive rendered chips. Supplying the whole
     // picker catalog and hiding unapplied entries left layout-sized gaps
     // before labels such as "Social".
-    app.set_mail_labels(ModelRc::new(VecModel::from(chip_rows)));
-    app.set_mail_label_results(ModelRc::new(VecModel::from(picker_rows)));
+    ui.set_mail_labels(ModelRc::new(VecModel::from(chip_rows)));
+    ui.set_mail_label_results(ModelRc::new(VecModel::from(picker_rows)));
 }
 
 pub(super) fn make_label_rows(
@@ -1293,9 +1311,10 @@ pub(super) fn slint_image(icon: &FaviconImage) -> Image {
     })
 }
 
-pub(super) fn apply_selected_favicon(app: &AppWindow, icons: Option<&FaviconImages>) {
-    app.set_selected_has_favicon(icons.is_some());
-    app.set_selected_favicon(
+pub(super) fn apply_selected_favicon(host: &ReaderRef, icons: Option<&FaviconImages>) {
+    let ui = host.ui();
+    ui.set_selected_has_favicon(icons.is_some());
+    ui.set_selected_favicon(
         icons
             .map(|icons| slint_image(&icons.regular))
             .unwrap_or_default(),
@@ -1408,16 +1427,17 @@ pub(super) fn refresh_rows_only(
     );
     server_search::show(app, &state.borrow());
     app.set_mail_selection_count(checked_ids.len() as i32);
-    app.set_selected_account_uses_labels(selected_email.as_ref().is_some_and(|email| {
-        state.borrow().connected_accounts.iter().any(|account| {
-            account.id == email.account_id && account.mail_protocol == MailProtocol::Gmail
-        })
-    }));
+    app.global::<ReaderUi>()
+        .set_selected_account_uses_labels(selected_email.as_ref().is_some_and(|email| {
+            state.borrow().connected_accounts.iter().any(|account| {
+                account.id == email.account_id && account.mail_protocol == MailProtocol::Gmail
+            })
+        }));
     app.global::<LocalMailUi>()
         .set_selected(selected_email.as_ref().is_some_and(|email| {
             state.borrow().local_mail.map(|local| local.account_id) == Some(email.account_id)
         }));
-    apply_label_rows(app, &labels, selected_email.as_ref());
+    apply_label_rows(&ReaderRef::main(app), &labels, selected_email.as_ref());
     // The reader's star and read state follow the open row, so an action on
     // it shows once the refreshed row has it, without rendering the message
     // again. They used to wait for the next selection.
@@ -1441,7 +1461,7 @@ pub(super) fn refresh_rows_only(
     let selected_icon = selected_domain
         .as_deref()
         .and_then(|domain| favicon_icons.get(domain));
-    apply_selected_favicon(app, selected_icon);
+    apply_selected_favicon(&ReaderRef::main(app), selected_icon);
     let conversation_projection = {
         let state = state.borrow();
         (state.conversation_owner_id == selected_id && !state.conversation_messages.is_empty())
@@ -1465,6 +1485,9 @@ pub(super) fn refresh_rows_only(
         );
     }
     schedule_favicon_fetches(app, state, runtime, &visible_domains);
+    // Conversation windows show the labels the list's rows have now.
+    #[cfg(desktop)]
+    crate::reader_window::list_changed();
 }
 
 /// Rebuilds the mail text the date formats produce, after the language or the
@@ -1490,7 +1513,8 @@ pub(super) fn refresh_message_dates(
         })
     };
     if let Some(date_ms) = date_ms {
-        app.set_selected_time(message_time(date_ms, &Local::now()).into());
+        app.global::<ReaderUi>()
+            .set_selected_time(message_time(date_ms, &Local::now()).into());
     }
 }
 
@@ -1554,7 +1578,9 @@ pub(super) fn schedule_favicon_fetches(
     );
     let (loader, tx, pending_count, generation) = {
         let mut state = state.borrow_mut();
-        if !state.remote_images_enabled {
+        // Fetching a spam sender's icon would tell the icon service, and
+        // through it whoever watches, which spam the user looked at.
+        if !state.remote_images_enabled || is_spam_scope(state.scope) {
             return;
         }
         if state.favicon_pixel_sides != pixel_sides {
@@ -1797,6 +1823,7 @@ pub(super) fn make_mailbox_rows(
                 can_create_children: mailbox.can_create_children,
                 can_rename: mailbox.can_rename,
                 can_delete: mailbox.can_delete,
+                can_hide: mailbox.can_hide,
                 label_has_emoji: contains_emoji(&mailbox.label),
                 label: mailbox.label.clone().into(),
                 scope: mailbox.scope.map(slint::SharedString::from).unwrap_or_default(),
@@ -1924,7 +1951,18 @@ fn scope_title(
     }
 }
 
-fn is_trash_scope(scope: Scope) -> bool {
+fn is_spam_scope(scope: Scope) -> bool {
+    matches!(
+        scope,
+        Scope::Unified(StandardMailbox::Spam)
+            | Scope::Account {
+                mailbox: StandardMailbox::Spam,
+                ..
+            }
+    )
+}
+
+pub(super) fn is_trash_scope(scope: Scope) -> bool {
     matches!(
         scope,
         Scope::Unified(StandardMailbox::Trash)
@@ -2174,6 +2212,8 @@ mod tests {
             reply_reminder_at: None,
             reply_reminder_due: false,
             to: String::new(),
+            to_people: Vec::new(),
+            cc_people: Vec::new(),
             label: String::new(),
             unread: false,
             starred: false,
@@ -2199,6 +2239,44 @@ mod tests {
             first_attachment: None,
             attachment_total: 0,
         }
+    }
+
+    #[test]
+    fn the_details_list_every_address_and_when_it_was_sent() {
+        use flectar_mail_core::models::Address;
+        let mut email = message(1);
+        email.sender = "Ada Lovelace".into();
+        email.address = "ada@example.com".into();
+        email.to_people = vec![
+            Address {
+                name: Some("Grace".into()),
+                email: "grace@example.com".into(),
+            },
+            Address {
+                name: None,
+                email: "alan@example.com".into(),
+            },
+        ];
+        // A name that only repeats the address is left out.
+        email.cc_people = vec![Address {
+            name: Some("Edsger@Example.com".into()),
+            email: "edsger@example.com".into(),
+        }];
+        email.date_ms = 1_763_745_720_000;
+        let details = super::super::mail_render_projection::message_details(&email);
+        let rows = |model: ModelRc<slint::SharedString>| {
+            (0..model.row_count())
+                .filter_map(|index| model.row_data(index))
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(details.from, "Ada Lovelace <ada@example.com>");
+        assert_eq!(
+            rows(details.to),
+            ["Grace <grace@example.com>", "alan@example.com"]
+        );
+        assert_eq!(rows(details.cc), ["edsger@example.com"]);
+        assert!(details.date.contains("2025"), "{}", details.date);
     }
 
     #[test]
@@ -2681,6 +2759,7 @@ mod tests {
             can_create_children: true,
             can_rename: true,
             can_delete: true,
+            can_hide: false,
             label: "Projects".into(),
             scope: Some(Scope::Folder(7)),
             context: "Account".into(),
@@ -2721,6 +2800,7 @@ mod tests {
             can_create_children: false,
             can_rename: false,
             can_delete: false,
+            can_hide: false,
             label: "Sent".into(),
             scope: Some(scope),
             context: context.into(),
@@ -2958,6 +3038,7 @@ mod tests {
             can_create_children: true,
             can_rename: true,
             can_delete: true,
+            can_hide: false,
             label: label.into(),
             scope: Some(Scope::Folder(folder_id)),
             context: "Account".into(),
@@ -2995,6 +3076,7 @@ mod tests {
             can_create_children: true,
             can_rename: true,
             can_delete: true,
+            can_hide: false,
             label: String::new(),
             scope,
             context: "Account".into(),

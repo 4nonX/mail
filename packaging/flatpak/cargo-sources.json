@@ -2,8 +2,8 @@
     {
         "type": "git",
         "url": "https://github.com/flectar/mail-sync-client",
-        "commit": "bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a",
-        "dest": "flatpak-cargo/git/mail-sync-client-bc06e75"
+        "commit": "f09489df8b9c7c870e95a0421ec1818d0ff1eaf6",
+        "dest": "flatpak-cargo/git/mail-sync-client-f09489d"
     },
     {
         "type": "archive",
@@ -3531,12 +3531,12 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/mail-sync-client-bc06e75/crates/flectar-mail-sync-client\" \"cargo/vendor/flectar-mail-sync-client\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/mail-sync-client-f09489d/crates/flectar-mail-sync-client\" \"cargo/vendor/flectar-mail-sync-client\""
         ]
     },
     {
         "type": "inline",
-        "contents": "[package]\nname = \"flectar-mail-sync-client\"\ndescription = \"Client of Flectar Mail Sync: sessions, membership, pairing and record sync\"\nlicense = \"Apache-2.0\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.92\"\nrepository = \"https://github.com/flectar/mail-sync-client\"\n\n[dependencies]\nflectar-mail-sync-crypto = { features = [\"kem\"], path = \"crates/flectar-mail-sync-crypto\", version = \"0.1.0\" }\nflectar-mail-sync-proto = { path = \"crates/flectar-mail-sync-proto\", version = \"0.1.0\" }\nfutures-util = { version = \"0.3\", default-features = false, features = [\"std\"] }\nreqwest = { version = \"0.13\", default-features = false, features = [\"json\", \"stream\"] }\nserde = { version = \"1.0.229\", features = [\"derive\"] }\nserde_json = \"1\"\nthiserror = \"2\"\ntokio = { features = [\"sync\", \"time\", \"macros\", \"rt-multi-thread\", \"net\", \"signal\", \"sync\", \"time\"], version = \"1.53\" }\ntracing = \"0.1\"\nurl = \"2\"\nzeroize = { version = \"1.9\", features = [\"derive\"] }\n\n[dev-dependencies]\ntokio = { features = [\"macros\", \"rt-multi-thread\", \"net\", \"macros\", \"rt-multi-thread\", \"net\", \"signal\", \"sync\", \"time\"], version = \"1.53\" }\n\n[lints.rust]\nunsafe_code = \"forbid\"\nmissing_debug_implementations = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"warn\"\ntodo = \"warn\"\nunwrap_used = \"warn\"\n",
+        "contents": "[package]\nname = \"flectar-mail-sync-client\"\ndescription = \"Client of Flectar Mail Sync: sessions, membership, pairing and record sync\"\nlicense = \"Apache-2.0\"\nversion = \"0.1.0\"\nedition = \"2024\"\nrust-version = \"1.92\"\nrepository = \"https://github.com/flectar/mail-sync-client\"\n\n[dependencies]\nflectar-mail-sync-crypto = { features = [\"kem\"], path = \"crates/flectar-mail-sync-crypto\", version = \"0.1.0\" }\nflectar-mail-sync-proto = { path = \"crates/flectar-mail-sync-proto\", version = \"0.1.0\" }\nfutures-util = { version = \"0.3\", default-features = false, features = [\"std\"] }\nreqwest = { version = \"0.13\", default-features = false, features = [\"json\", \"stream\"] }\nserde = { version = \"1.0.229\", features = [\"derive\"] }\nserde_json = \"1\"\nthiserror = \"2\"\ntokio = { features = [\"sync\", \"time\", \"macros\", \"rt-multi-thread\", \"net\", \"signal\", \"sync\", \"time\"], version = \"1.53\" }\ntracing = \"0.1\"\nurl = \"2\"\nzeroize = { version = \"1.9\", features = [\"derive\"] }\n\n[dev-dependencies]\nrustls = { version = \"0.23\", default-features = false, features = [\"ring\", \"std\", \"tls12\"] }\ntokio = { features = [\"macros\", \"rt-multi-thread\", \"net\", \"macros\", \"rt-multi-thread\", \"net\", \"signal\", \"sync\", \"time\"], version = \"1.53\" }\n\n[lints.rust]\nunsafe_code = \"forbid\"\nmissing_debug_implementations = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"warn\"\ntodo = \"warn\"\nunwrap_used = \"warn\"\n",
         "dest": "cargo/vendor/flectar-mail-sync-client",
         "dest-filename": "Cargo.toml"
     },
@@ -3549,7 +3549,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/mail-sync-client-bc06e75/crates/flectar-mail-sync-crypto\" \"cargo/vendor/flectar-mail-sync-crypto\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/mail-sync-client-f09489d/crates/flectar-mail-sync-crypto\" \"cargo/vendor/flectar-mail-sync-crypto\""
         ]
     },
     {
@@ -3567,7 +3567,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/mail-sync-client-bc06e75/crates/flectar-mail-sync-proto\" \"cargo/vendor/flectar-mail-sync-proto\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/mail-sync-client-f09489d/crates/flectar-mail-sync-proto\" \"cargo/vendor/flectar-mail-sync-proto\""
         ]
     },
     {
@@ -5015,19 +5015,6 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/i-slint-core/i-slint-core-1.19.0.crate",
-        "sha256": "9590458a3ba4ad8e66a6b572dbe758cc5d4f84f57e682a097358e4fe0f02b006",
-        "dest": "cargo/vendor/i-slint-core-1.19.0"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"9590458a3ba4ad8e66a6b572dbe758cc5d4f84f57e682a097358e4fe0f02b006\", \"files\": {}}",
-        "dest": "cargo/vendor/i-slint-core-1.19.0",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/i-slint-core-macros/i-slint-core-macros-1.19.0.crate",
         "sha256": "aeb9b5ef5c97fa81a39f276e6c15c6826b12ada401891501cc5b9ecf36f6f500",
         "dest": "cargo/vendor/i-slint-core-macros-1.19.0"
@@ -5600,14 +5587,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/jiff/jiff-1.0.2.crate",
-        "sha256": "c5e77cbfb9fff4798e283c2d69dff39fc2c45e7da017e5ce95b654e46ea41236",
-        "dest": "cargo/vendor/jiff-1.0.2"
+        "url": "https://static.crates.io/crates/jiff/jiff-1.0.3.crate",
+        "sha256": "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f",
+        "dest": "cargo/vendor/jiff-1.0.3"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"c5e77cbfb9fff4798e283c2d69dff39fc2c45e7da017e5ce95b654e46ea41236\", \"files\": {}}",
-        "dest": "cargo/vendor/jiff-1.0.2",
+        "contents": "{\"package\": \"107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f\", \"files\": {}}",
+        "dest": "cargo/vendor/jiff-1.0.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -5626,14 +5613,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/jiff-core/jiff-core-1.0.1.crate",
-        "sha256": "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8",
-        "dest": "cargo/vendor/jiff-core-1.0.1"
+        "url": "https://static.crates.io/crates/jiff-core/jiff-core-1.0.2.crate",
+        "sha256": "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f",
+        "dest": "cargo/vendor/jiff-core-1.0.2"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8\", \"files\": {}}",
-        "dest": "cargo/vendor/jiff-core-1.0.1",
+        "contents": "{\"package\": \"d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f\", \"files\": {}}",
+        "dest": "cargo/vendor/jiff-core-1.0.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -5652,14 +5639,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/jiff-static/jiff-static-1.0.2.crate",
-        "sha256": "e9067a0b23e5be3147d56b2dcf652b18e6b1364caca93fb157653b6fbcab23a9",
-        "dest": "cargo/vendor/jiff-static-1.0.2"
+        "url": "https://static.crates.io/crates/jiff-static/jiff-static-1.0.3.crate",
+        "sha256": "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8",
+        "dest": "cargo/vendor/jiff-static-1.0.3"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"e9067a0b23e5be3147d56b2dcf652b18e6b1364caca93fb157653b6fbcab23a9\", \"files\": {}}",
-        "dest": "cargo/vendor/jiff-static-1.0.2",
+        "contents": "{\"package\": \"4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8\", \"files\": {}}",
+        "dest": "cargo/vendor/jiff-static-1.0.3",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -8629,6 +8616,32 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/psl/psl-2.1.249.crate",
+        "sha256": "d5a4e068733aa4f2ef06083331e02678699f997128ad66e57a8adc7e3f654ba0",
+        "dest": "cargo/vendor/psl-2.1.249"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"d5a4e068733aa4f2ef06083331e02678699f997128ad66e57a8adc7e3f654ba0\", \"files\": {}}",
+        "dest": "cargo/vendor/psl-2.1.249",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/psl-types/psl-types-2.0.11.crate",
+        "sha256": "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac",
+        "dest": "cargo/vendor/psl-types-2.0.11"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac\", \"files\": {}}",
+        "dest": "cargo/vendor/psl-types-2.0.11",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/pulldown-cmark/pulldown-cmark-0.13.6.crate",
         "sha256": "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b",
         "dest": "cargo/vendor/pulldown-cmark-0.13.6"
@@ -11177,14 +11190,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/taffy/taffy-0.15.0.crate",
-        "sha256": "3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa",
-        "dest": "cargo/vendor/taffy-0.15.0"
+        "url": "https://static.crates.io/crates/taffy/taffy-0.15.1.crate",
+        "sha256": "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d",
+        "dest": "cargo/vendor/taffy-0.15.1"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa\", \"files\": {}}",
-        "dest": "cargo/vendor/taffy-0.15.0",
+        "contents": "{\"package\": \"31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d\", \"files\": {}}",
+        "dest": "cargo/vendor/taffy-0.15.1",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -14400,7 +14413,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/flectar/mail-sync-client\"]\ngit = \"https://github.com/flectar/mail-sync-client\"\nreplace-with = \"vendored-sources\"\nrev = \"bc06e7501b43e5ae1be7dc8af0eb334cc5fb467a\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/flectar/mail-sync-client\"]\ngit = \"https://github.com/flectar/mail-sync-client\"\nreplace-with = \"vendored-sources\"\nrev = \"f09489df8b9c7c870e95a0421ec1818d0ff1eaf6\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }

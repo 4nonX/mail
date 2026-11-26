@@ -117,9 +117,7 @@ fn android_main(app: slint::android::AndroidApp) {
         Ok(play) => flectar_mail::platform::installed_by_play(play),
         Err(error) => tracing::warn!(%error, "could not tell which store installed the app"),
     }
-    // SAFETY: AndroidApp owns these live VM and Activity references.
-    unsafe { tls::initialize(app.vm_as_ptr().cast(), app.activity_as_ptr().cast()) }
-        .expect("failed to initialize Android TLS certificate verification");
+    trust::install_for_window(&app).expect("failed to set up Android's certificate checks");
     // SAFETY: AndroidApp owns the live process VM.
     match unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) } {
         Ok(vm) => proxy::install(vm),
@@ -150,6 +148,9 @@ fn android_main(app: slint::android::AndroidApp) {
     if let Err(error) = motion::install(&app) {
         tracing::warn!(%error, "the system's reduce motion setting is unavailable");
     }
+    if let Err(error) = metered::install(&app) {
+        tracing::warn!(%error, "whether the network is metered is unavailable");
+    }
     let documents =
         documents::AndroidDocuments::new(&app).expect("failed to initialize document access");
     let mut platform = flectar_mail::PlatformContext::app_private(
@@ -165,6 +166,7 @@ fn android_main(app: slint::android::AndroidApp) {
         Ok(spelling) => platform.spelling = Some(std::sync::Arc::new(spelling)),
         Err(error) => tracing::warn!(%error, "spell checking unavailable"),
     }
+    platform.qr_scanner = Some(std::sync::Arc::new(qr_scanner::AndroidQrScanner::new(&app)));
     slint::android::init(app).expect("failed to initialize Slint's Android backend");
     flectar_mail::run(platform).expect("Flectar Mail terminated with an error");
     // Work that outlives the activity, such as a check for new mail, asks
@@ -183,7 +185,7 @@ mod notifications;
 #[cfg(target_os = "android")]
 mod oauth;
 #[cfg(target_os = "android")]
-mod tls;
+mod trust;
 
 #[cfg(target_os = "android")]
 mod documents;
@@ -193,11 +195,14 @@ mod launcher_icon;
 #[cfg(target_os = "android")]
 mod memory;
 #[cfg(target_os = "android")]
+mod metered;
+#[cfg(target_os = "android")]
 mod motion;
 #[cfg(target_os = "android")]
 mod pdf;
 #[cfg(target_os = "android")]
 mod proxy;
+mod qr_scanner;
 #[cfg(target_os = "android")]
 mod spelling;
 #[cfg(target_os = "android")]

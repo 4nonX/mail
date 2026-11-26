@@ -31,12 +31,14 @@ fn main() {
             .file("platform/ios/MemoryPressure.m")
             .file("platform/ios/BackgroundChecks.m")
             .file("platform/ios/ReduceMotion.m")
+            .file("platform/ios/QrScanner.m")
             .flag("-fobjc-arc")
             .compile("flectar_documents");
         println!("cargo:rustc-link-lib=framework=UIKit");
         println!("cargo:rustc-link-lib=framework=Foundation");
         println!("cargo:rustc-link-lib=framework=AuthenticationServices");
         println!("cargo:rustc-link-lib=framework=BackgroundTasks");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
         // iOS gives the main thread a 1 MB stack, and Slint's generated code
         // for the main window takes a 930 KiB frame when the mailbox first
         // appears (slint-ui/slint#14817). Ask for the 8 MiB the same code gets
@@ -49,16 +51,31 @@ fn main() {
         println!("cargo:rerun-if-changed=platform/ios/MemoryPressure.m");
         println!("cargo:rerun-if-changed=platform/ios/BackgroundChecks.m");
         println!("cargo:rerun-if-changed=platform/ios/ReduceMotion.m");
+        println!("cargo:rerun-if-changed=platform/ios/QrScanner.m");
     }
     if std::env::var_os("CARGO_CFG_TARGET_OS").as_deref() == Some(std::ffi::OsStr::new("windows")) {
-        winresource::WindowsResource::new()
-            .set_icon("resources/app-icon/flectar-mail.ico")
+        let mut resources = winresource::WindowsResource::new();
+        resources.set_icon("resources/app-icon/flectar-mail.ico");
+        // The other icons Settings offers, which this copy's shortcuts and
+        // taskbar pins name by these ids (src/app_icon/taskbar.rs).
+        for (id, name) in [
+            (2, "graphite"),
+            (3, "light"),
+            (4, "blue"),
+            (5, "green"),
+            (6, "purple"),
+        ] {
+            let icon = format!("resources/app-icon/variants/{name}.ico");
+            resources.set_icon_with_id(&icon, &id.to_string());
+            println!("cargo:rerun-if-changed={icon}");
+        }
+        resources
             // Opts into the segment heap (Windows 10 2004 and later), which
             // Microsoft says generally reduces memory use. Nothing else is set:
             // declaring DPI awareness or an OS version would change behaviour.
             .set_manifest_file("platform/windows/flectar-mail.manifest.xml")
             .compile()
-            .expect("failed to embed the Windows icon and manifest");
+            .expect("failed to embed the Windows icons and manifest");
         println!("cargo:rerun-if-changed=resources/app-icon/flectar-mail.ico");
         println!("cargo:rerun-if-changed=platform/windows/flectar-mail.manifest.xml");
     }

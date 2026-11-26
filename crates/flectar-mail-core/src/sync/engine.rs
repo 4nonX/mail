@@ -107,7 +107,7 @@ struct InboxBaseline {
     first_live_uid: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CycleMode {
     /// Cycles completed so far; every fifth checks every folder in full.
     cycle: u64,
@@ -117,6 +117,24 @@ struct CycleMode {
     list_status: bool,
     /// What the server pushed for the Inbox during IDLE since the last cycle.
     inbox_pushed: PushedChanges,
+    folders: FolderSync,
+}
+
+/// Which folders a cycle syncs besides the Inbox (#253).
+#[derive(Debug, Clone, Default)]
+struct FolderSync {
+    /// The folders this device leaves out of its background sync, by path.
+    unsynced: std::collections::BTreeSet<String>,
+    /// Folders opened since the last cycle, which it checks in full though
+    /// they're left out.
+    checks: HashSet<i64>,
+}
+
+impl FolderSync {
+    /// Whether the cycle syncs `folder`.
+    fn includes(&self, folder: &Folder) -> bool {
+        repo::folders::syncs(folder, &self.unsynced) || self.checks.contains(&folder.id)
+    }
 }
 
 /// Changes the server reported for the selected Inbox during IDLE. The next
@@ -166,8 +184,14 @@ pub struct AccountHandle {
     settings_tx: Option<watch::Sender<crate::models::AccountSettings>>,
     /// The account's server timeout, which its tasks wait by (#252).
     server_timeout: std::time::Duration,
+    /// IMAP accounts: folders opened that the account's sync leaves out,
+    /// which its next cycle checks (#253).
+    folder_checks: Option<FolderChecks>,
     tasks: Vec<tokio::task::AbortHandle>,
 }
+
+/// Folders an IMAP account's worker checks in its next cycle (#253).
+type FolderChecks = Arc<std::sync::Mutex<HashSet<i64>>>;
 
 /// A request to download a stored message's original file again after it
 /// went missing from this device. Answered with the file's new path.
@@ -263,6 +287,19 @@ impl AccountHandle {
         for task in &self.tasks {
             task.abort();
         }
+    }
+
+    /// Check a folder this device leaves out of its sync, once, as it's
+    /// opened (#253). Whether the account's worker was told.
+    pub fn check_folder(&self, folder_id: i64) -> bool {
+        let Some(checks) = &self.folder_checks else {
+            return false;
+        };
+        checks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(folder_id);
+        self.send(SyncCmd::SyncNow { complete: None })
     }
 
     pub fn sync_now(&self) -> oneshot::Receiver<std::result::Result<(), String>> {
@@ -363,6 +400,7 @@ impl AccountHandle {
             restore_tx: None,
             settings_tx: None,
             server_timeout: crate::net::timeouts::STANDARD,
+            folder_checks: None,
             tasks: Vec::new(),
         }
     }
@@ -386,6 +424,7 @@ mod account_handle_tests {
             restore_tx: None,
             settings_tx: Some(settings_tx),
             server_timeout: crate::net::timeouts::STANDARD,
+            folder_checks: None,
             tasks: Vec::new(),
         };
 
@@ -406,6 +445,9 @@ pub struct SyncCtx {
     /// When each account's server asked to be left alone until, and how
     /// many connections it takes (#251).
     pub pace: Arc<super::pacing::Pace>,
+    /// Whether downloading ahead of time waits on a metered connection
+    /// (#253).
+    pub metered: Arc<crate::net::metered::Metered>,
 }
 
 pub fn spawn_account(ctx: SyncCtx, config: AccountConfig) -> AccountHandle {
@@ -419,6 +461,7 @@ pub fn spawn_account(ctx: SyncCtx, config: AccountConfig) -> AccountHandle {
     // Every task of the account waits for its servers as long as its server
     // timeout says (#252).
     let server_timeout = config.settings.connection.server_timeout();
+    let folder_checks = (config.mail_protocol == MailProtocol::Imap).then(FolderChecks::default);
     // API protocols own their submission queues. SMTP-based protocols get a
     // dedicated submission worker that never waits behind mailbox sync.
     let (joins, send_tx, restore_tx) =
@@ -459,6 +502,7 @@ pub fn spawn_account(ctx: SyncCtx, config: AccountConfig) -> AccountHandle {
                         pool_tx.clone(),
                         hist_tx,
                         settings_rx.clone(),
+                        folder_checks.clone().unwrap_or_default(),
                     )),
                     crate::net::timeouts::spawn(run_body_fetcher(
                         ctx.clone(),
@@ -527,6 +571,7 @@ pub fn spawn_account(ctx: SyncCtx, config: AccountConfig) -> AccountHandle {
         restore_tx,
         settings_tx: Some(settings_tx),
         server_timeout,
+        folder_checks,
         tasks: joins
             .iter()
             .map(tokio::task::JoinHandle::abort_handle)
@@ -547,6 +592,7 @@ pub fn spawn_local(ctx: SyncCtx, account_id: i64) -> AccountHandle {
         restore_tx: None,
         settings_tx: None,
         server_timeout: crate::net::timeouts::STANDARD,
+        folder_checks: None,
         tasks: vec![join.abort_handle()],
     }
 }
@@ -1045,6 +1091,7 @@ async fn run_actor(
     pool_tx: mpsc::Sender<()>,
     hist_tx: mpsc::Sender<()>,
     settings_rx: watch::Receiver<AccountSettings>,
+    folder_checks: FolderChecks,
 ) {
     let account_id = config.id;
     crate::events::sync_diagnostic("imap_worker", Some(account_id), "started");
@@ -1118,6 +1165,11 @@ async fn run_actor(
                         "imap connect rejected at auth; marking needs_reauth"
                     );
                     set_state(&ctx, account_id, "needs_reauth").await;
+                    // Checks waiting on this account learn at once that it
+                    // needs a sign-in, rather than when they give up.
+                    for waiter in sync_waiters.drain(..) {
+                        let _ = waiter.send(Err("authentication required".into()));
+                    }
                     // Wait for an external nudge before retrying auth.
                     match rx.recv().await {
                         None | Some(SyncCmd::Shutdown) => return,
@@ -1142,6 +1194,10 @@ async fn run_actor(
                     ctx.bus.emit(CoreEvent::NetworkState { online: false });
                     let message = e.to_string();
                     set_state_error(&ctx, account_id, "offline", &message).await;
+                    // As do checks of an account that can't be reached.
+                    for waiter in sync_waiters.drain(..) {
+                        let _ = waiter.send(Err(message.clone()));
+                    }
                     // Backoff, but wake early on commands.
                     let wait = backoff.after(&e).duration;
                     match tokio::time::timeout(wait, rx.recv()).await {
@@ -1195,6 +1251,17 @@ async fn run_actor(
         let settings = settings_rx.borrow().clone();
         listing.subscribed_only(settings.subscribed_folders_only);
         let foreground_only = !sync_waiters.is_empty();
+        // Folders opened since the last cycle; a foreground pass leaves them
+        // to the full one right after it.
+        let checks = if foreground_only {
+            HashSet::new()
+        } else {
+            std::mem::take(
+                &mut *folder_checks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+        };
         let cycle_result = run_cycle(
             &ctx,
             &config,
@@ -1208,9 +1275,20 @@ async fn run_actor(
                 immediate_follow_up,
                 list_status: capabilities.is_some_and(|offered| offered.list_status),
                 inbox_pushed,
+                folders: FolderSync {
+                    unsynced: settings.unsynced_folders.clone(),
+                    checks: checks.clone(),
+                },
             },
         )
         .await;
+        // A cycle that failed checks them in the next one.
+        if cycle_result.is_err() {
+            folder_checks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(checks);
+        }
         tracing::debug!(
             account_id,
             cycle,
@@ -1820,7 +1898,7 @@ pub async fn status_for_account(db: &Db, account_id: i64) -> Result<SyncStatus> 
 
 pub(super) async fn emit_sync_status(ctx: &SyncCtx, account_id: i64) {
     if let Ok(status) = status_for_account(&ctx.db, account_id).await {
-        ctx.bus.emit(CoreEvent::SyncStatus(status));
+        ctx.bus.emit(CoreEvent::SyncStatus(Box::new(status)));
     }
 }
 
@@ -1883,6 +1961,7 @@ async fn run_cycle(
         immediate_follow_up,
         list_status,
         inbox_pushed,
+        folders: folder_sync,
     } = mode;
     let account_id = config.id;
     let started = now_ms();
@@ -1908,8 +1987,12 @@ async fn run_cycle(
             .await?
     };
 
-    // Sync order: inbox first, then sent/drafts, then the rest.
-    let mut ordered: Vec<&Folder> = folders.iter().filter(|folder| folder.selectable).collect();
+    // Sync order: inbox first, then sent/drafts, then the rest. Folders this
+    // device leaves out wait until they're opened (#253).
+    let mut ordered: Vec<&Folder> = folders
+        .iter()
+        .filter(|folder| folder.selectable && folder_sync.includes(folder))
+        .collect();
     ordered.sort_by_key(|f| match f.role.as_deref() {
         Some(roles::INBOX) => 0,
         Some(roles::SENT) => 1,
@@ -2003,8 +2086,10 @@ async fn run_cycle(
         if folder.role.as_deref() == Some(roles::ALL) {
             continue;
         }
-        let folder_check = check(folder, full_pass);
-        if !full_pass && folder_check.unchanged() {
+        // An opened folder left out of sync is brought up to date in full.
+        let opened = folder_sync.checks.contains(&folder.id);
+        let folder_check = check(folder, full_pass || opened);
+        if !full_pass && !opened && folder_check.unchanged() {
             continue;
         }
         match sync_folder(
@@ -2757,6 +2842,11 @@ async fn run_history_backfill(
             if settings_rx.has_changed().unwrap_or(true) {
                 break 'work;
             }
+            // Older mail waits for an unmetered connection, when the device
+            // chose so (#253).
+            if ctx.metered.downloads_wait() {
+                break 'work;
+            }
             let mut progressed = match retry_one_header_failure(&ctx, &config, &mut session).await {
                 Ok(progressed) => progressed,
                 Err(e) => {
@@ -2776,8 +2866,13 @@ async fn run_history_backfill(
                 Ok(f) => f,
                 Err(_) => break,
             };
-            let mut ordered: Vec<&Folder> =
-                folders.iter().filter(|folder| folder.selectable).collect();
+            // Folders this device leaves out of its sync stay as they are
+            // (#253).
+            let unsynced = settings_rx.borrow().unsynced_folders.clone();
+            let mut ordered: Vec<&Folder> = folders
+                .iter()
+                .filter(|folder| folder.selectable && repo::folders::syncs(folder, &unsynced))
+                .collect();
             ordered.sort_by_key(|f| match f.role.as_deref() {
                 Some(roles::INBOX) => 0,
                 Some(roles::SENT) => 1,
@@ -2871,7 +2966,8 @@ async fn run_history_backfill(
             if !progressed {
                 // Fully caught up. Don't hold an idle connection open between
                 // ticks - servers reap them and the next step would fail.
-                if let Err(e) = settle_unlinked_mail(&ctx, &config, &mut session).await {
+                let unsynced = settings_rx.borrow().unsynced_folders.clone();
+                if let Err(e) = settle_unlinked_mail(&ctx, &config, &mut session, &unsynced).await {
                     tracing::warn!(account_id, error = %e, "could not settle mail without a UID; retrying later");
                     note_limit(&ctx, account_id, &e);
                 }
@@ -2891,10 +2987,13 @@ async fn run_history_backfill(
 /// Each folder's mail since the oldest waiting message is matched by
 /// Message-ID first, so mail outside the history is found too, and whatever
 /// still waits is no longer on the server.
+/// `unsynced` names the folders this device leaves out of its sync (#253),
+/// whose history isn't waited for, though they're searched.
 async fn settle_unlinked_mail(
     ctx: &SyncCtx,
     config: &AccountConfig,
     session: &mut Option<Session>,
+    unsynced: &std::collections::BTreeSet<String>,
 ) -> Result<()> {
     let account_id = config.id;
     let Some(oldest) = ctx
@@ -2917,9 +3016,10 @@ async fn settle_unlinked_mail(
     if !synced
         .iter()
         .any(|folder| folder.role.as_deref() == Some(roles::INBOX))
-        || synced
-            .iter()
-            .any(|folder| folder.backfill_cursor.is_none() || !folder.backfill_done)
+        || synced.iter().any(|folder| {
+            repo::folders::syncs(folder, unsynced)
+                && (folder.backfill_cursor.is_none() || !folder.backfill_done)
+        })
     {
         return Ok(());
     }
@@ -4013,6 +4113,72 @@ mod content_batch_tests {
     use crate::db::testutil;
 
     #[test]
+    fn issue_455_selective_content_shows_a_forwarded_message_below_the_body() {
+        use async_imap::imap_proto::{AttributeValue, Response};
+        let response = b"* 1 FETCH (UID 7 BODYSTRUCTURE ((\"text\" \"plain\" NIL NIL NIL \"7bit\" 12 1 NIL NIL NIL NIL)\
+            (\"message\" \"rfc822\" NIL NIL NIL \"7bit\" 300 (\"Tue, 17 Nov 2026 12:00:00 +0900\" \"Original message\" \
+            ((NIL NIL \"original\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL) \
+            ((\"text\" \"plain\" (\"charset\" \"utf-8\") NIL NIL \"quoted-printable\" 18 1 NIL NIL NIL NIL)\
+            (\"text\" \"html\" (\"charset\" \"utf-8\") NIL NIL \"7bit\" 30 1 NIL NIL NIL NIL) \"alternative\" (\"boundary\" \"alt\") NIL NIL NIL) \
+            6 NIL (\"inline\" NIL) NIL NIL) \"mixed\" (\"boundary\" \"b\") NIL NIL NIL))\r\n";
+        let (_, Response::Fetch(_, attributes)) = Response::parse(response).unwrap() else {
+            panic!("not a FETCH response");
+        };
+        let plan = attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                AttributeValue::BodyStructure(structure) => {
+                    Some(crate::mime::plan_bodystructure(structure))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let section = |section: &str, header: &str, body: &str| imap::FetchedSection {
+            section: section.into(),
+            mime_header: format!("{header}\r\n\r\n").into_bytes(),
+            body: body.as_bytes().to_vec(),
+        };
+        let content = decode_selective_content(
+            PlannedBodyFetch {
+                message_id: 1,
+                uid: 7,
+                plan,
+            },
+            vec![
+                section("1", "Content-Type: text/plain", "Outer body."),
+                section(
+                    "2.1",
+                    "Content-Type: text/plain; charset=utf-8\r\n\
+                     Content-Transfer-Encoding: quoted-printable",
+                    "Forwarded=20body.",
+                ),
+                section(
+                    "2.2",
+                    "Content-Type: text/html; charset=utf-8",
+                    "<p>Forwarded <b>body</b>.</p>",
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            content.text_body.as_deref(),
+            Some(
+                "Outer body.\n\n---------- Forwarded message ----------\n\
+                 From: original@example.com\n\
+                 Date: Tue, 17 Nov 2026 12:00:00 +0900\n\
+                 Subject: Original message\n\n\
+                 Forwarded body."
+            )
+        );
+        let html = content.html_body.unwrap();
+        let outer = html.find("Outer body.").unwrap();
+        let block = html.find("flectar-embedded-message").unwrap();
+        let body = html.find("<p>Forwarded <b>body</b>.</p>").unwrap();
+        assert!(outer < block && block < body, "{html}");
+        assert!(content.snippet.starts_with("Outer body."));
+    }
+
+    #[test]
     fn content_retries_escalate_at_exact_boundaries_and_reset_when_cleared() {
         let mut conn = testutil::conn();
         testutil::seed_account(&conn);
@@ -4195,8 +4361,10 @@ mod content_batch_tests {
                     charset: Some("utf-8".into()),
                     transfer_encoding: "8bit".into(),
                     size,
+                    message: None,
                 }],
                 attachments: Vec::new(),
+                messages: Vec::new(),
             },
         }
     }
@@ -4343,13 +4511,17 @@ async fn drain_missing_bodies(
         // queued IDs across accounts and always takes the planning permit
         // before any worker can take the body-byte permit.
         let plan_page = Arc::new(reserve_background_plan_page().await);
-        let (mail_history, download) = {
+        let (mail_history, download, unsynced) = {
             let settings = settings_rx.borrow_and_update();
-            (settings.mail_history, settings.download)
+            (
+                settings.mail_history,
+                settings.download,
+                settings.unsynced_folders.clone(),
+            )
         };
-        // Only the headers are wanted: messages download when they're
-        // opened (#253).
-        if download == crate::models::DownloadPolicy::Headers {
+        // Only the headers are wanted, or the device waits for an unmetered
+        // connection: messages download when they're opened (#253).
+        if download == crate::models::DownloadPolicy::Headers || ctx.metered.downloads_wait() {
             return Ok(());
         }
         let cutoff_ms = mail_history.cutoff_ms_at(now_ms());
@@ -4357,7 +4529,11 @@ async fn drain_missing_bodies(
             .db
             .read(move |conn| repo::folders::list(conn, Some(account_id)))
             .await?;
-        let mut ordered: Vec<&Folder> = folders.iter().filter(|folder| folder.selectable).collect();
+        // Nor do the folders this device leaves out of its sync (#253).
+        let mut ordered: Vec<&Folder> = folders
+            .iter()
+            .filter(|folder| folder.selectable && repo::folders::syncs(folder, &unsynced))
+            .collect();
         ordered.sort_by_key(|f| match f.role.as_deref() {
             Some(roles::INBOX) => 0,
             Some(roles::SENT) => 1,
@@ -5093,6 +5269,9 @@ fn decode_selective_content(
     let mut plain = Vec::new();
     let mut html = Vec::new();
     let mut calendar_parts = Vec::new();
+    // The text of each message the body shows (#455), as `plain` and `html`
+    // are the message's own.
+    let mut shown = vec![(Vec::new(), Vec::new()); item.plan.messages.len()];
     for planned in &item.plan.text_sections {
         let section = fetched_by_section.get(&planned.section).ok_or_else(|| {
             CoreError::Mime(format!(
@@ -5102,15 +5281,27 @@ fn decode_selective_content(
         })?;
         let decoded =
             crate::mime::decode_planned_text_section(planned, &section.mime_header, &section.body)?;
+        let (texts, htmls) = match planned
+            .message
+            .and_then(|index| shown.get_mut(usize::from(index)))
+        {
+            Some((texts, htmls)) => (texts, htmls),
+            None => (&mut plain, &mut html),
+        };
         match decoded.kind {
-            crate::mime::TextSectionKind::Plain => plain.push(decoded.content),
-            crate::mime::TextSectionKind::Html => html.push(decoded.content),
+            crate::mime::TextSectionKind::Plain => texts.push(decoded.content),
+            crate::mime::TextSectionKind::Html => htmls.push(decoded.content),
             crate::mime::TextSectionKind::Calendar => calendar_parts.push(decoded.content),
         }
     }
 
     let text_body = (!plain.is_empty()).then(|| plain.join("\n\n"));
     let html_body = (!html.is_empty()).then(|| html.join("\n"));
+    let (text_body, html_body) = crate::mime::with_messages(
+        text_body,
+        html_body,
+        &crate::mime::planned_messages(&item.plan.messages, shown),
+    );
     let snippet = crate::mime::make_body_snippet(text_body.as_deref(), html_body.as_deref());
     Ok(DecodedSelectiveContent {
         message_id: item.message_id,

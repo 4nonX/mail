@@ -6,16 +6,16 @@ use flectar_mail_core::{
     events::CoreEvent,
     models::{
         Account, AccountConfig, ActionKind, ActionParams, ActionTarget, AddPasswordAccountArgs,
-        Address, BlockOffer, BlockResult, CalendarConnection, CalendarEvent, CardDavConnection,
-        ConnectCaldavArgs, ConnectCardDavArgs, ContactRecordCursor, ContactRecordPage,
-        CreateEventArgs, CustomTheme, DraftAttachmentIn, FolderInfo, ForwardedMessage, Importance,
-        InvitationCard, Label, ListOrder, ListOwner, MailGrouping, MailHistory, MailProfile,
-        MailProtocol, MailRule, MailboxBadgeCounts, MessageCursor, MessageDetail,
-        MessageSearchCursor, MessageSummary, PerformActionArgs, PortableAccountConfig, Provider,
-        QueueSendArgs, QueueSendResult, RsvpEventArgs, SaveDraftArgs, ScheduledSend, SearchCursor,
-        SenderIdentity, ServerRules, ServerRulesAnswer, ServerSearchCursor, Settings, Snippet,
-        ThreadCursor, ThreadSummary, UnsubscribeOffer, UnsubscribeOutcome, View,
-        normalized_workspace_list_pane_width, roles,
+        Address, BlockOffer, BlockResult, CalendarConnection, CalendarEvent, CancelledSend,
+        CardDavConnection, ConnectCaldavArgs, ConnectCardDavArgs, ContactRecordCursor,
+        ContactRecordPage, CreateEventArgs, CustomTheme, DraftAttachmentIn, FolderInfo,
+        ForwardedMessage, Importance, InvitationCard, Label, ListOrder, ListOwner, MailGrouping,
+        MailHistory, MailProfile, MailProtocol, MailRule, MailboxBadgeCounts, MessageCursor,
+        MessageDetail, MessageSearchCursor, MessageSummary, PerformActionArgs,
+        PortableAccountConfig, Provider, QueueSendArgs, QueueSendResult, RsvpEventArgs,
+        SaveDraftArgs, ScheduledSend, SearchCursor, SenderIdentity, ServerRules, ServerRulesAnswer,
+        ServerSearchCursor, Settings, Snippet, ThreadCursor, ThreadSummary, UnsubscribeOffer,
+        UnsubscribeOutcome, View, normalized_workspace_list_pane_width, roles,
     },
 };
 #[cfg(test)]
@@ -94,7 +94,12 @@ pub struct MailMessage {
     pub reply_reminder_at: Option<i64>,
     /// That time came with no reply.
     pub reply_reminder_due: bool,
+    /// Everyone the message went to, on one line: see [`recipients_line`].
     pub to: String,
+    /// Its To and Cc recipients, as the message names them, for the
+    /// reader's details. Mail-list pages know only the To recipients.
+    pub to_people: Vec<Address>,
+    pub cc_people: Vec<Address>,
     pub label: String,
     pub unread: bool,
     pub starred: bool,
@@ -162,6 +167,8 @@ impl MailMessage {
             reply_reminder_at: None,
             reply_reminder_due: false,
             to: email.to.to_owned(),
+            to_people: Vec::new(),
+            cc_people: Vec::new(),
             label: email.label.to_owned(),
             unread: email.unread,
             starred: email.starred,
@@ -202,6 +209,8 @@ pub struct MailboxEntry {
     pub can_create_children: bool,
     pub can_rename: bool,
     pub can_delete: bool,
+    /// A folder the user can hide from the sidebar (#253).
+    pub can_hide: bool,
     pub label: String,
     /// Absent for account headings, which are not navigation targets.
     pub scope: Option<Scope>,
@@ -758,7 +767,7 @@ impl CoreMailSource {
             .map_err(|error| error.to_string())?;
         let mut folders = self
             .core
-            .list_folders(None)
+            .list_shown_folders(None)
             .await
             .map_err(|error| error.to_string())?;
         let local_mail = self.load_local_mail_account().await?;
@@ -797,7 +806,7 @@ impl CoreMailSource {
             .map_err(|error| error.to_string())?;
         let mut folders = self
             .core
-            .list_folders(None)
+            .list_shown_folders(None)
             .await
             .map_err(|error| error.to_string())?;
         let local_mail = self.load_local_mail_account().await?;
@@ -851,7 +860,7 @@ impl CoreMailSource {
         let mut shown = accounts.clone();
         let local_mail = self.load_local_mail_account().await?;
         let profile = with_local_mail(profile, local_mail);
-        let (scope, page) = match self.core.list_folders(None).await {
+        let (scope, page) = match self.core.list_shown_folders(None).await {
             Ok(mut folders) => {
                 retain_profile_accounts(profile.as_deref(), &mut shown, &mut folders);
                 let mut labels = self.core.list_labels().await.unwrap_or_default();
@@ -897,7 +906,7 @@ impl CoreMailSource {
             .map_err(|error| error.to_string())?;
         let mut folders = self
             .core
-            .list_folders(None)
+            .list_shown_folders(None)
             .await
             .map_err(|error| error.to_string())?;
         let local_mail = self.load_local_mail_account().await?;
@@ -1480,11 +1489,11 @@ impl CoreMailSource {
             .min_by_key(|send| send.send_at))
     }
 
-    /// Stop a row's scheduled send; its draft stays. Returns whether one
-    /// waited.
-    pub async fn cancel_scheduled_row(&self, row: &MailMessage) -> Result<bool, String> {
+    /// Stop a row's scheduled send; its draft stays. Says whether one
+    /// waited, and whether another of the user's devices may still send it.
+    pub async fn cancel_scheduled_row(&self, row: &MailMessage) -> Result<CancelledSend, String> {
         let Some(send) = self.scheduled_send_of(row).await? else {
-            return Ok(false);
+            return Ok(CancelledSend::NotScheduled);
         };
         self.core
             .cancel_scheduled_send(send.draft_id)
@@ -1818,6 +1827,42 @@ impl CoreMailSource {
     ) -> Result<(), String> {
         self.core
             .create_folder(account_id, parent_folder_id, name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Hide a folder, with the folders in it, from the sidebar and the Move
+    /// to list, or show it again (#253).
+    pub async fn set_folder_hidden(&self, folder_id: i64, hidden: bool) -> Result<(), String> {
+        self.core
+            .set_folder_hidden(folder_id, hidden)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Choose whether this device syncs an IMAP account's folder (#253).
+    pub async fn set_folder_synced(&self, folder_id: i64, synced: bool) -> Result<(), String> {
+        self.core
+            .set_folder_synced(folder_id, synced)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// Check a folder this device doesn't sync, as it's opened (#253).
+    pub async fn check_folder(&self, folder_id: i64) -> Result<(), String> {
+        self.core
+            .check_folder(folder_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    /// An account's folders, to choose which show (#253).
+    pub async fn account_folders(
+        &self,
+        account_id: i64,
+    ) -> Result<Vec<flectar_mail_core::models::AccountFolder>, String> {
+        self.core
+            .account_folders(account_id)
             .await
             .map_err(|error| error.to_string())
     }
@@ -2312,6 +2357,15 @@ impl CoreMailSource {
             .map_err(|error| error.to_string())
     }
 
+    pub async fn set_compose_in_window(&self, enabled: bool) -> Result<(), String> {
+        let mut settings = self.load_settings().await?;
+        settings.compose_in_window = enabled;
+        self.core
+            .set_settings(settings)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn set_conversation_view(&self, enabled: bool) -> Result<(), String> {
         let mut settings = self.load_settings().await?;
         settings.conversation_view = enabled;
@@ -2529,6 +2583,35 @@ impl CoreMailSource {
                 cursor,
                 limit,
             )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn preview_contact_import(
+        &self,
+        file: Vec<u8>,
+    ) -> Result<flectar_mail_core::models::ContactImportPreview, String> {
+        self.core
+            .preview_contact_import(file)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn import_contacts(
+        &self,
+        file: Vec<u8>,
+        account_id: Option<i64>,
+        duplicates: flectar_mail_core::models::ImportedDuplicates,
+    ) -> Result<flectar_mail_core::models::ContactImportOutcome, String> {
+        self.core
+            .import_contacts(file, account_id, duplicates)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn export_contacts(&self) -> Result<(String, usize), String> {
+        self.core
+            .export_contacts()
             .await
             .map_err(|error| error.to_string())
     }
@@ -3508,14 +3591,33 @@ fn compose_args(
 }
 
 fn parse_recipients(value: &str) -> Result<Vec<Address>, String> {
-    value
-        // Recipient rows wrap onto multiple lines, and pasted lists often put
-        // one address per line: accept newlines as separators like `,`/`;`.
-        .split([',', ';', '\n'])
+    recipient_entries(value).map(parse_address).collect()
+}
+
+/// The entries of a recipient field. Commas, semicolons and line breaks
+/// separate them: rows wrap onto several lines, and pasted lists often put
+/// one address per line. A separator inside a quoted name, as in
+/// `"Doe, Jane" <jane@example.com>` (RFC 5322 section 3.2.4), doesn't.
+pub(crate) fn recipient_entries(field: &str) -> impl Iterator<Item = &str> {
+    let mut entries = Vec::new();
+    let (mut start, mut quoted, mut escaped) = (0, false, false);
+    for (index, character) in field.char_indices() {
+        match character {
+            _ if escaped => escaped = false,
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            ',' | ';' | '\n' if !quoted => {
+                entries.push(&field[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    entries.push(&field[start..]);
+    entries
+        .into_iter()
         .map(str::trim)
-        .filter(|recipient| !recipient.is_empty())
-        .map(parse_address)
-        .collect()
+        .filter(|entry| !entry.is_empty())
 }
 
 pub(crate) fn parse_address(value: &str) -> Result<Address, String> {
@@ -3532,10 +3634,30 @@ pub(crate) fn parse_address(value: &str) -> Result<Address, String> {
     Ok(Address {
         name: name
             .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned),
+            .map(unquoted_name)
+            .filter(|name| !name.is_empty()),
         email: email.to_owned(),
     })
+}
+
+/// A display name without the quotes and backslashes a header puts around
+/// it, as copied from a message: `"Doe, Jane"` is `Doe, Jane`.
+fn unquoted_name(name: &str) -> String {
+    let Some(inner) = name
+        .strip_prefix('"')
+        .and_then(|name| name.strip_suffix('"'))
+    else {
+        return name.to_owned();
+    };
+    let mut unquoted = String::with_capacity(inner.len());
+    let mut characters = inner.chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => unquoted.extend(characters.next()),
+            _ => unquoted.push(character),
+        }
+    }
+    unquoted.trim().to_owned()
 }
 
 const fn standard_mailbox_view(mailbox: StandardMailbox) -> View {
@@ -3579,10 +3701,12 @@ struct FolderTreeRoot<'a> {
     standard_mailbox: Option<StandardMailbox>,
 }
 
+/// `hides` says whether the account's folders can be hidden (#253).
 fn append_folder_tree<'a>(
     entries: &mut Vec<MailboxEntry>,
     root: FolderTreeRoot<'a>,
     account_label: &str,
+    hides: bool,
     children: &std::collections::HashMap<i64, Vec<&'a FolderInfo>>,
     visited: &mut std::collections::HashSet<i64>,
 ) {
@@ -3618,6 +3742,11 @@ fn append_folder_tree<'a>(
             can_create_children: folder.can_create_children,
             can_rename: folder.can_rename,
             can_delete: folder.can_delete,
+            // The Inbox and the folders with a role always show.
+            can_hide: hides
+                && !is_standard
+                && folder.role.is_none()
+                && !folder.path.eq_ignore_ascii_case("INBOX"),
             label,
             scope: Some(
                 standard_mailbox.map_or(Scope::Folder(folder.id), |mailbox| Scope::Account {
@@ -3666,6 +3795,7 @@ fn mailbox_entries(
             can_create_children: account.can_create_top_level_mailbox,
             can_rename: false,
             can_delete: false,
+            can_hide: false,
             label: account_label.clone(),
             scope: None,
             context: account_label.clone(),
@@ -3701,6 +3831,7 @@ fn mailbox_entries(
             can_create_children: true,
             can_rename: false,
             can_delete: false,
+            can_hide: false,
             label: String::new(),
             scope: None,
             context: String::new(),
@@ -3730,6 +3861,9 @@ fn append_mailboxes(
         .iter()
         .filter(|folder| folder.account_id == account_id)
         .collect::<Vec<_>>();
+    // Gmail's labels are its own, and local mail has no settings to show a
+    // hidden folder again (#253).
+    let hides = !gmail && !local;
     let role_folders = StandardMailbox::ALL
         .into_iter()
         .filter_map(|mailbox| {
@@ -3816,6 +3950,7 @@ fn append_mailboxes(
                         standard_mailbox: Some(mailbox),
                     },
                     account_label,
+                    hides,
                     &children,
                     visited,
                 );
@@ -3835,6 +3970,7 @@ fn append_mailboxes(
                 can_create_children: false,
                 can_rename: false,
                 can_delete: false,
+                can_hide: false,
                 label: mailbox.label().to_owned(),
                 scope: Some(Scope::Account {
                     account_id,
@@ -3871,6 +4007,7 @@ fn append_mailboxes(
                 standard_mailbox: None,
             },
             account_label,
+            hides,
             &children,
             &mut visited,
         );
@@ -3893,6 +4030,7 @@ fn append_mailboxes(
                     standard_mailbox: None,
                 },
                 account_label,
+                hides,
                 &children,
                 &mut visited,
             );
@@ -3958,6 +4096,7 @@ fn unified_mailbox_entries(badges: &[MailboxBadgeCounts]) -> Vec<MailboxEntry> {
             can_create_children: false,
             can_rename: false,
             can_delete: false,
+            can_hide: false,
             label: mailbox.label().to_owned(),
             scope: Some(Scope::Unified(mailbox)),
             context: "Unified".to_owned(),
@@ -4289,6 +4428,8 @@ fn summary_to_message(
         reply_reminder_at: thread.reply_reminder_at,
         reply_reminder_due: thread.reply_reminder_due,
         to: String::new(),
+        to_people: Vec::new(),
+        cc_people: Vec::new(),
         label: if thread.unread_count > 0 {
             "UNREAD".to_owned()
         } else {
@@ -4321,16 +4462,29 @@ fn summary_to_message(
     })
 }
 
+/// What a message calls someone: their name where it gives one, else their
+/// address.
+pub(crate) fn display_name(person: &Address) -> &str {
+    person
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&person.email)
+}
+
+/// Everyone a message went to, on one line, its To recipients before its Cc
+/// ones, as in "Ada, Grace, alan@example.com".
+fn recipients_line(to: &[Address], cc: &[Address]) -> String {
+    to.iter()
+        .chain(cc)
+        .map(display_name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A row's people, named as "A", "A, B" or "A, B +N", and the first one's
 /// address, which names the row's avatar.
 fn display_people(people: &[&Address]) -> (String, String) {
-    fn display_name(person: &Address) -> &str {
-        person
-            .name
-            .as_deref()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or(&person.email)
-    }
     let address = people
         .first()
         .map(|person| person.email.clone())
@@ -4400,11 +4554,9 @@ fn message_summary_to_message(
         send_uncertain: false,
         reply_reminder_at: message.reply_reminder_at,
         reply_reminder_due: message.reply_reminder_due,
-        to: message
-            .to
-            .first()
-            .map(|address| address.email.clone())
-            .unwrap_or_default(),
+        to: recipients_line(&message.to, &[]),
+        to_people: message.to.clone(),
+        cc_people: Vec::new(),
         label: if message.is_draft {
             "DRAFT".to_owned()
         } else if !message.is_read {
@@ -4516,11 +4668,9 @@ fn detail_to_message(row: &MailMessage, message: &MessageDetail, body_loaded: bo
         send_uncertain: row.send_uncertain && scheduled,
         reply_reminder_at: row.reply_reminder_at,
         reply_reminder_due: row.reply_reminder_due,
-        to: message
-            .to
-            .first()
-            .map(|address| address.email.clone())
-            .unwrap_or_default(),
+        to: recipients_line(&message.to, &message.cc),
+        to_people: message.to.clone(),
+        cc_people: message.cc.clone(),
         label: if message.is_draft {
             "DRAFT".to_owned()
         } else if message.is_outgoing {
@@ -4593,6 +4743,9 @@ fn detail_to_conversation_message(
 
 fn readable_message_html(html: Option<&str>, text: Option<&str>, snippet: &str) -> String {
     html.filter(|value| !value.trim().is_empty())
+        // The Gmail sync stores a message that has only text as that text in
+        // a `<pre>`. Show it as plain-text mail from other accounts is shown.
+        .filter(|value| !text.is_some_and(|text| is_text_in_pre(value, text)))
         .map(str::to_owned)
         .or_else(|| {
             text.filter(|value| !value.trim().is_empty())
@@ -4602,6 +4755,21 @@ fn readable_message_html(html: Option<&str>, text: Option<&str>, snippet: &str) 
         // body row while its MIME sections are in flight. Never turn that
         // transient state into a completely white reading pane.
         .unwrap_or_else(|| text_to_html(&display_preview(snippet)))
+}
+
+/// Whether `html` is `text` in a bare `<pre>`, escaped as the Gmail sync
+/// escapes it.
+fn is_text_in_pre(html: &str, text: &str) -> bool {
+    html.strip_prefix("<pre>")
+        .and_then(|html| html.strip_suffix("</pre>"))
+        .is_some_and(|inner| {
+            inner.len() >= text.len()
+                && inner
+                    == text
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+        })
 }
 
 fn account_label(account: &Account) -> String {
@@ -4795,9 +4963,9 @@ mod tests {
     use super::{
         ComposeMessage, MailTarget, SidebarBadges, compose_args, display_thread_subject,
         mailbox_entries, mailbox_entries_with_counts, markdown_to_html, markdown_to_plain_text,
-        message_summary_to_message, readable_message_html, resolve_scope, server_only_folders,
-        sidebar_badges, summary_to_message, unified_mailbox_entries, validated_startup_scope,
-        with_local_mail,
+        message_summary_to_message, readable_message_html, recipients_line, resolve_scope,
+        server_only_folders, sidebar_badges, summary_to_message, unified_mailbox_entries,
+        validated_startup_scope, with_local_mail,
     };
     use crate::mail_scope::{LabelKind, Scope, StandardMailbox};
     use flectar_mail_core::models::{
@@ -5097,6 +5265,24 @@ mod tests {
     }
 
     #[test]
+    fn gmail_text_bodies_show_as_plain_text() {
+        // The Gmail sync stores a message that has only text as that text in
+        // a `<pre>`, which reads like plain-text mail from other accounts.
+        let text = "Hi <Ana> & team,\n\n> Earlier reply";
+        let stored = "<pre>Hi &lt;Ana&gt; &amp; team,\n\n&gt; Earlier reply</pre>";
+        assert_eq!(
+            readable_message_html(Some(stored), Some(text), "preview"),
+            readable_message_html(None, Some(text), "preview")
+        );
+        // A sender's own preformatted HTML is left as it is.
+        let authored = "<pre style=\"color:#333\">Hi</pre>";
+        assert_eq!(
+            readable_message_html(Some(authored), Some("Hi"), "preview"),
+            authored
+        );
+    }
+
+    #[test]
     fn plain_text_body_preserves_reply_lines_and_quote_depth() {
         let text = "Hi Tomas,\n\n> Earlier reply\n>> Older reply";
         let html = readable_message_html(None, Some(text), "preview");
@@ -5183,6 +5369,25 @@ mod tests {
         let row = message_summary_to_message(sent, &[test_account()], "Sent").unwrap();
         assert_eq!(row.sender, "maya@example.com, alex@example.com");
         assert_eq!(row.address, "maya@example.com");
+    }
+
+    #[test]
+    fn the_reader_names_everyone_a_message_went_to() {
+        let person = |name: Option<&str>, email: &str| Address {
+            name: name.map(str::to_owned),
+            email: email.into(),
+        };
+        assert_eq!(
+            recipients_line(
+                &[
+                    person(Some("Ada"), "ada@example.com"),
+                    person(Some(" "), "grace@example.com"),
+                ],
+                &[person(Some("Alan Turing"), "alan@example.com")],
+            ),
+            "Ada, grace@example.com, Alan Turing"
+        );
+        assert_eq!(recipients_line(&[], &[]), "");
     }
 
     #[test]
@@ -5461,6 +5666,62 @@ mod tests {
         assert_eq!(parsed[1].email, "grace@example.com");
         assert_eq!(parsed[2].email, "alan@example.com");
         assert!(parsed[2].name.is_none());
+    }
+
+    #[test]
+    fn quoted_names_keep_their_separators() {
+        let parsed = super::parse_recipients(
+            "\"Doe, Jane\" <jane@example.com>; \"Say \\\"hi\\\"; bye\" <x@example.com>, bob@example.com",
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].name.as_deref(), Some("Doe, Jane"));
+        assert_eq!(parsed[0].email, "jane@example.com");
+        assert_eq!(parsed[1].name.as_deref(), Some("Say \"hi\"; bye"));
+        assert_eq!(parsed[1].email, "x@example.com");
+        assert_eq!(parsed[2].email, "bob@example.com");
+        assert!(parsed[2].name.is_none());
+    }
+
+    #[test]
+    fn received_names_with_separators_round_trip_through_the_field() {
+        let received = [
+            Address {
+                name: Some("Boss\"".into()),
+                email: "boss@example.com".into(),
+            },
+            Address {
+                name: Some("Doe, Jane".into()),
+                email: "jane@example.com".into(),
+            },
+            Address {
+                name: Some("Back\\slash <x>".into()),
+                email: "x@example.com".into(),
+            },
+            Address {
+                name: Some("Ann\r\nBcc".into()),
+                email: "ann@example.com".into(),
+            },
+        ];
+        let field = received
+            .iter()
+            .map(crate::compose_controller::format_address)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let parsed = super::parse_recipients(&field).unwrap();
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|address| (address.name.as_deref(), address.email.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some("Boss\""), "boss@example.com"),
+                (Some("Doe, Jane"), "jane@example.com"),
+                (Some("Back\\slash <x>"), "x@example.com"),
+                (Some("AnnBcc"), "ann@example.com"),
+            ],
+            "{field}"
+        );
     }
 
     #[test]

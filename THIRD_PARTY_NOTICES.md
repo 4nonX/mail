@@ -24,6 +24,10 @@ upstream license texts in
 [`crates/i-slint-renderer-software/LICENSES`](crates/i-slint-renderer-software/LICENSES),
 and its clip fix is documented in
 [`patches/slint-renderer-software/README.md`](patches/slint-renderer-software/README.md).
+The locally patched `i-slint-core` 1.19.0 crate retains its upstream license
+texts in [`crates/i-slint-core/LICENSES`](crates/i-slint-core/LICENSES), and its
+fling fix is documented in
+[`patches/slint-core/README.md`](patches/slint-core/README.md).
 
 ## Vello
 
@@ -55,7 +59,7 @@ retains its license texts in
 [`crates/jmap-client/LICENSE-MIT`](crates/jmap-client/LICENSE-MIT) and
 [`crates/jmap-client/LICENSE-APACHE`](crates/jmap-client/LICENSE-APACHE). The
 upstream source is <https://github.com/stalwartlabs/jmap-client>. Its proxy
-patch, source checksum, and removal condition are documented in
+and TLS patches, source checksum, and removal condition are documented in
 [`patches/jmap-client/README.md`](patches/jmap-client/README.md).
 
 ## Blitz

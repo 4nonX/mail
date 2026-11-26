@@ -4,13 +4,10 @@
 use super::*;
 use flectar_mail_core::models::{ActionTarget, ForwardedMessage};
 
-/// The longest name a forwarded message's file takes from its subject, in characters.
-const MAX_NAME_CHARS: usize = 64;
-
 impl Composers {
-    /// Forward the message the reader shows as an attachment.
-    pub(super) fn forward_shown_as_attachment(self: &Rc<Self>, app: &AppWindow) {
-        let (row, shown) = self.shown_message();
+    /// Forward the message `reader` shows as an attachment.
+    pub(super) fn forward_shown_as_attachment(self: &Rc<Self>, app: &AppWindow, reader: ReaderKey) {
+        let (row, shown) = self.shown_message(reader);
         let (target, latest) = match (shown, row) {
             (Some(id), _) => (ActionTarget::Messages(vec![id]), false),
             (None, Some(row)) => match (row.message_id, row.thread_id) {
@@ -33,7 +30,7 @@ impl Composers {
         if latest {
             messages.drain(..messages.len().saturating_sub(1));
         }
-        self.forward_messages(app, messages);
+        self.forward_messages(app, messages, reader);
     }
 
     /// Forward the messages of `targets` as attachments of a new message.
@@ -43,7 +40,7 @@ impl Composers {
         targets: Vec<ActionTarget>,
     ) {
         if let Some(messages) = self.forwarded_messages(app, targets) {
-            self.forward_messages(app, messages);
+            self.forward_messages(app, messages, ReaderKey::Main);
         }
     }
 
@@ -75,7 +72,12 @@ impl Composers {
 
     /// Open a new message with `messages` as its attachments, which opens at once: their
     /// originals reach it as they're fetched.
-    fn forward_messages(self: &Rc<Self>, app: &AppWindow, messages: Vec<ForwardedMessage>) {
+    fn forward_messages(
+        self: &Rc<Self>,
+        app: &AppWindow,
+        messages: Vec<ForwardedMessage>,
+        reader: ReaderKey,
+    ) {
         let Some(core) = self.core() else {
             return;
         };
@@ -103,7 +105,7 @@ impl Composers {
             return;
         };
         let subject = crate::compose_controller::prefixed_subject(&first.subject, "Fwd");
-        let Some(session) = self.open(app) else {
+        let Some(session) = self.start_for(app, reader) else {
             return;
         };
         let Some(host) = session.host() else {
@@ -136,24 +138,27 @@ impl Composers {
         session.attach_forwarded(&core, messages, &fallback);
     }
 
-    /// The message row the reader shows, and the message of its conversation it shows when the
+    /// The message row `reader` shows, and the message of its conversation it shows when the
     /// row is a conversation.
-    pub(super) fn shown_message(&self) -> (Option<MailMessage>, Option<i64>) {
-        let state = self.state.borrow();
-        let row = state
-            .selected_id
-            .and_then(|id| state.messages.iter().find(|message| message.id == id))
-            .cloned();
-        let shown = row.as_ref().and_then(|row| {
-            (state.conversation_owner_id == Some(row.id))
-                .then(|| {
-                    state
-                        .conversation_messages
-                        .get(state.conversation_selected_index)
-                        .map(|message| i64::from(message.id))
+    pub(super) fn shown_message(&self, reader: ReaderKey) -> (Option<MailMessage>, Option<i64>) {
+        let row = crate::reader_host::row(&self.state, reader);
+        let shown = match reader {
+            ReaderKey::Main => {
+                let state = self.state.borrow();
+                row.as_ref().and_then(|row| {
+                    (state.conversation_owner_id == Some(row.id))
+                        .then(|| {
+                            state
+                                .conversation_messages
+                                .get(state.conversation_selected_index)
+                                .map(|message| i64::from(message.id))
+                        })
+                        .flatten()
                 })
-                .flatten()
-        });
+            }
+            #[cfg(desktop)]
+            ReaderKey::Window(id) => crate::reader_window::shown_conversation_message(id),
+        };
         (row, shown)
     }
 }
@@ -235,24 +240,9 @@ impl ComposeSession {
 fn file_names(messages: &[ForwardedMessage], fallback: &str) -> Vec<(i64, String)> {
     let mut names: Vec<(i64, String)> = Vec::with_capacity(messages.len());
     for message in messages {
-        let mut base = message
-            .subject
-            .chars()
-            .map(|character| match character {
-                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => ' ',
-                character if character.is_control() => ' ',
-                character => character,
-            })
-            .collect::<String>()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if base.chars().count() > MAX_NAME_CHARS {
-            base = base.chars().take(MAX_NAME_CHARS).collect::<String>();
-            base = base.trim_end().to_owned();
-        }
-        let base = base.trim_matches('.').trim();
-        let base = if base.is_empty() { fallback } else { base };
+        // The same name a received forward without one gets (#455).
+        let base = flectar_mail_core::mime::message_file_stem(&message.subject);
+        let base = if base.is_empty() { fallback } else { &base };
         let mut name = format!("{base}.eml");
         let mut number = 2;
         while names

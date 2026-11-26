@@ -4,6 +4,7 @@ mod cpu_scene;
 mod details;
 #[cfg(test)]
 mod details_tests;
+mod embedded;
 mod interaction;
 #[cfg(test)]
 mod regression;
@@ -23,13 +24,16 @@ use blitz_traits::net::NetWaker;
 use blitz_traits::{SmolStr, net::NetProvider, node_id::NodeId, shell::Viewport};
 use details::FindMatch;
 pub(crate) use details::set_default_summary;
+pub(crate) use embedded::{HEADER_VALUE, HeaderLines, set_header_lines};
 use keyboard_types::{Key, NamedKey};
 use parley::layout::PositionedLayoutItem;
 use semantics::*;
 #[cfg(feature = "gpu-renderer")]
 use slint::wgpu_30::wgpu;
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
+    rc::Rc,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -97,9 +101,6 @@ const EMAIL_FONT_FALLBACK_STYLE: &str = r#"
 <style data-flectar-mail="font-fallback">
   html, body {
     font-family: Arial, "Liberation Sans", "Noto Sans", sans-serif;
-  }
-  pre, code, kbd, samp {
-    font-family: "DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", monospace;
   }
 </style>
 "#;
@@ -171,9 +172,15 @@ pub struct RenderedEmail {
     pub links: Vec<EmailLink>,
 }
 
-pub struct GpuEmailRenderer {
+/// What every message a window shows can share: Vello's GPU pipeline on
+/// Slint's device, the CPU painter with its prepared glyphs and converted
+/// images, and whether the window is suspended or the system is short of
+/// memory. Each `GpuEmailRenderer` keeps one message, and renderers made with
+/// the same backend paint with it in turn. The painter's image cache is keyed
+/// by each image's own blob, so messages never see each other's images.
+#[derive(Default)]
+pub struct PaintBackend {
     suspended: bool,
-    email: Option<PreparedEmail>,
     #[cfg(feature = "gpu-renderer")]
     renderer: Option<vello::Renderer>,
     #[cfg(feature = "gpu-renderer")]
@@ -182,12 +189,37 @@ pub struct GpuEmailRenderer {
     scene: vello::Scene,
     #[cfg(all(test, feature = "gpu-renderer"))]
     gpu_teardown_count: usize,
+    cpu_painter: Option<VelloCpuImageRenderer>,
+    cpu_size: (u32, u32),
+    /// No overscan is painted before this, after the system reported memory
+    /// pressure.
+    low_memory_until: Option<Instant>,
+    /// Counts the times the GPU device was given up. Tiles painted before the
+    /// last time may belong to a device that is gone, whichever renderer gave
+    /// it up.
+    device_generation: u64,
+}
+
+impl PaintBackend {
+    #[cfg(feature = "gpu-renderer")]
+    fn shares_gpu(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        self.gpu_context
+            .as_ref()
+            .is_some_and(|(active_device, active_queue)| {
+                active_device == device && active_queue == queue
+            })
+    }
+}
+
+pub struct GpuEmailRenderer {
+    backend: Rc<RefCell<PaintBackend>>,
+    /// The backend's `device_generation` when `tiles` were painted.
+    tiles_generation: u64,
+    email: Option<PreparedEmail>,
     last_size: Option<(u32, u32, u32, u32, u32)>,
     dirty: bool,
     paint_dirty: bool,
-    painted_selection: Vec<(NodeId, usize, usize)>,
-    cpu_painter: Option<VelloCpuImageRenderer>,
-    cpu_size: (u32, u32),
+    painted_marks: PaintedMarks,
     tile_work_limit: usize,
     pub preparation_viewport: (u32, u32, f32),
     appearance: EmailAppearance,
@@ -223,9 +255,6 @@ pub struct GpuEmailRenderer {
     tiles: BTreeMap<u32, RenderedEmailTile>,
     /// Height of `tiles` in document pixels; see `email_tile_height`.
     tile_height: f32,
-    /// No overscan is painted before this, after the system reported memory
-    /// pressure.
-    low_memory_until: Option<Instant>,
     pointer_down: bool,
     last_pointer_down: Option<(Instant, f32, f32)>,
     resource_runtime: Option<tokio::runtime::Handle>,
@@ -238,23 +267,22 @@ pub struct GpuEmailRenderer {
 
 impl Default for GpuEmailRenderer {
     fn default() -> Self {
+        Self::with_backend(Rc::default())
+    }
+}
+
+impl GpuEmailRenderer {
+    /// A renderer that paints with `backend`, which other renderers may share.
+    pub fn with_backend(backend: Rc<RefCell<PaintBackend>>) -> Self {
+        let tiles_generation = backend.borrow().device_generation;
         Self {
-            suspended: false,
+            backend,
+            tiles_generation,
             email: None,
-            #[cfg(feature = "gpu-renderer")]
-            renderer: None,
-            #[cfg(feature = "gpu-renderer")]
-            gpu_context: None,
-            #[cfg(feature = "gpu-renderer")]
-            scene: vello::Scene::new(),
-            #[cfg(all(test, feature = "gpu-renderer"))]
-            gpu_teardown_count: 0,
             last_size: None,
             dirty: false,
             paint_dirty: false,
-            painted_selection: Vec::new(),
-            cpu_painter: None,
-            cpu_size: (0, 0),
+            painted_marks: PaintedMarks::default(),
             tile_work_limit: usize::MAX,
             preparation_viewport: (INITIAL_WIDTH, INITIAL_HEIGHT, 1.0),
             appearance: EmailAppearance::default(),
@@ -287,7 +315,6 @@ impl Default for GpuEmailRenderer {
             visible_height: INITIAL_HEIGHT as f32,
             tiles: BTreeMap::new(),
             tile_height: EMAIL_TILE_HEIGHT,
-            low_memory_until: None,
             pointer_down: false,
             last_pointer_down: None,
             resource_runtime: None,
@@ -298,9 +325,25 @@ impl Default for GpuEmailRenderer {
             resource_notifier: None,
         }
     }
-}
 
-impl GpuEmailRenderer {
+    /// Drop tiles that a GPU device given up through another renderer owns.
+    fn catch_up_with_device(&mut self) {
+        let generation = self.backend.borrow().device_generation;
+        if self.tiles_generation != generation {
+            self.tiles_generation = generation;
+            self.forget_device_tiles();
+        }
+    }
+
+    /// The tiles may be textures on a device that is gone, so paint them
+    /// again and lay the message out for whichever device comes next.
+    fn forget_device_tiles(&mut self) {
+        self.last_size = None;
+        self.dirty = self.email.is_some();
+        self.region_dirty = self.email.is_some();
+        self.tiles.clear();
+    }
+
     /// Notify the UI event loop when Blitz has completed a resource request.
     /// This avoids an always-running timer while keeping the DOM on its owning
     /// Slint thread.
@@ -407,6 +450,7 @@ impl GpuEmailRenderer {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 drain_email_updates(
                     email,
+                    &self.resources,
                     &mut self.dirty,
                     &mut self.region_dirty,
                     &mut self.tiles,
@@ -465,10 +509,10 @@ impl GpuEmailRenderer {
         self.metadata_revision += 1;
         self.selection_anchor = None;
         self.selection_focus = None;
-        self.painted_selection.clear();
+        self.painted_marks = PaintedMarks::default();
         self.find_matches.clear();
         self.find_query.clear();
-        self.cpu_painter = None;
+        self.backend.borrow_mut().cpu_painter = None;
         // Completions may have arrived while the document was being prepared.
         self.resource_poll_ticks.store(1, Ordering::Release);
         self.dirty = false;
@@ -522,20 +566,23 @@ impl GpuEmailRenderer {
     }
 
     /// Keep the document, selection and scroll position, but release pixels
-    /// and raster scratch space while the native window is in the tray.
+    /// and raster scratch space while the native window is in the tray. No
+    /// renderer that shares the backend paints until it is resumed.
     pub fn set_suspended(&mut self, suspended: bool) {
-        self.suspended = suspended;
+        let mut backend = self.backend.borrow_mut();
+        backend.suspended = suspended;
         if suspended {
             self.tiles.clear();
-            self.cpu_painter = None;
+            backend.cpu_painter = None;
             if let Some(email) = self.email.as_mut() {
                 email.paint_cache.clear();
             }
             #[cfg(feature = "gpu-renderer")]
             {
-                self.scene = vello::Scene::new();
+                backend.scene = vello::Scene::new();
             }
         }
+        drop(backend);
         self.last_size = None;
         self.dirty = self.email.is_some();
     }
@@ -560,12 +607,12 @@ impl GpuEmailRenderer {
         self.find_query.clear();
         self.loaded_key = None;
         self.paint_dirty = false;
-        self.painted_selection.clear();
+        self.painted_marks = PaintedMarks::default();
         self.selection_anchor = None;
         self.selection_focus = None;
         self.metadata_revision += 1;
         self.resource_poll_ticks.store(0, Ordering::Release);
-        self.cpu_painter = None;
+        self.backend.borrow_mut().cpu_painter = None;
         self.last_size = None;
         self.dirty = false;
         self.region_dirty = false;
@@ -580,11 +627,7 @@ impl GpuEmailRenderer {
 
     #[cfg(feature = "gpu-renderer")]
     pub fn shares_gpu(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
-        self.gpu_context
-            .as_ref()
-            .is_some_and(|(active_device, active_queue)| {
-                active_device == device && active_queue == queue
-            })
+        self.backend.borrow().shares_gpu(device, queue)
     }
 
     #[cfg(feature = "gpu-renderer")]
@@ -593,11 +636,16 @@ impl GpuEmailRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> Result<(), String> {
-        if self.gpu_context.is_some() && !self.shares_gpu(device, queue) {
+        let replaced = {
+            let backend = self.backend.borrow();
+            backend.gpu_context.is_some() && !backend.shares_gpu(device, queue)
+        };
+        if replaced {
             self.teardown_gpu();
         }
-        if self.renderer.is_none() {
-            self.renderer = Some(
+        let mut backend = self.backend.borrow_mut();
+        if backend.renderer.is_none() {
+            backend.renderer = Some(
                 vello::Renderer::new(
                     device,
                     vello::RendererOptions {
@@ -611,7 +659,7 @@ impl GpuEmailRenderer {
                 )
                 .map_err(|error| format!("could not initialize Vello GPU renderer: {error:?}"))?,
             );
-            self.gpu_context = Some((device.clone(), queue.clone()));
+            backend.gpu_context = Some((device.clone(), queue.clone()));
         }
 
         Ok(())
@@ -619,28 +667,41 @@ impl GpuEmailRenderer {
 
     /// Drop resources tied to Slint's WGPU device. The next frame will build
     /// the small Vello pipeline again against the new device after a suspend,
-    /// display change, or Android surface recreation.
+    /// display change, or Android surface recreation. Renderers that share the
+    /// backend drop their tiles before they paint again.
     #[cfg(feature = "gpu-renderer")]
     pub fn teardown_gpu(&mut self) {
-        #[cfg(test)]
         {
-            self.gpu_teardown_count += 1;
+            let mut backend = self.backend.borrow_mut();
+            #[cfg(test)]
+            {
+                backend.gpu_teardown_count += 1;
+            }
+            backend.renderer = None;
+            backend.gpu_context = None;
+            backend.scene = vello::Scene::new();
+            backend.device_generation += 1;
+            self.tiles_generation = backend.device_generation;
         }
-        self.renderer = None;
-        self.gpu_context = None;
-        self.scene = vello::Scene::new();
-        self.last_size = None;
-        self.dirty = self.email.is_some();
-        self.region_dirty = self.email.is_some();
-        self.tiles.clear();
+        self.forget_device_tiles();
     }
 
     /// Under memory pressure: keep the document and the tiles on screen, and
     /// drop the overscan tiles, the painter with its image cache, and the paint
     /// cache. Until `until` no overscan is painted, as WebKit keeps its tiles
     /// to the visible area under pressure. Returns whether tiles were dropped.
+    /// Renderers that share the backend paint no overscan either, and keep
+    /// their own tiles until they are given the same call.
     pub fn release_caches(&mut self, until: Instant) -> bool {
-        self.low_memory_until = Some(until);
+        {
+            let mut backend = self.backend.borrow_mut();
+            backend.low_memory_until = Some(until);
+            backend.cpu_painter = None;
+            #[cfg(feature = "gpu-renderer")]
+            {
+                backend.scene = vello::Scene::new();
+            }
+        }
         let visible = desired_tile_range(
             self.visible_scroll_y,
             self.visible_height,
@@ -650,15 +711,25 @@ impl GpuEmailRenderer {
         );
         let before = self.tiles.len();
         self.tiles.retain(|index, _| visible.contains(index));
-        self.cpu_painter = None;
         if let Some(email) = self.email.as_mut() {
             email.paint_cache.clear();
         }
-        #[cfg(feature = "gpu-renderer")]
-        {
-            self.scene = vello::Scene::new();
-        }
         self.tiles.len() != before
+    }
+
+    /// Once painting stops, give back the CPU painter's working memory. Its
+    /// render context keeps every buffer at the size the busiest tile needed.
+    /// Resizing builds a new context and keeps the converted images and
+    /// prepared glyphs, so the next tile only allocates the buffers again.
+    pub fn release_paint_buffers(&mut self) {
+        // Like the idle hook with the renderer, skip a backend in use.
+        let Ok(mut backend) = self.backend.try_borrow_mut() else {
+            return;
+        };
+        let (width, height) = backend.cpu_size;
+        if let Some(painter) = backend.cpu_painter.as_mut() {
+            painter.resize(width, height);
+        }
     }
 
     /// The tiles held now, for the view after `release_caches`.
@@ -669,6 +740,8 @@ impl GpuEmailRenderer {
     /// Tiles painted beyond each edge of the viewport.
     fn overscan(&self) -> u32 {
         if self
+            .backend
+            .borrow()
             .low_memory_until
             .is_some_and(|until| Instant::now() < until)
         {
@@ -861,7 +934,10 @@ impl GpuEmailRenderer {
     }
 
     pub fn needs_repaint(&self) -> bool {
-        !self.suspended && (self.dirty || self.paint_dirty || self.region_dirty)
+        let backend = self.backend.borrow();
+        let device_lost =
+            self.email.is_some() && self.tiles_generation != backend.device_generation;
+        !backend.suspended && (self.dirty || self.paint_dirty || self.region_dirty || device_lost)
     }
 
     /// Configure automatic fitting for either renderer.
@@ -884,6 +960,7 @@ impl GpuEmailRenderer {
         };
         drain_email_updates(
             email,
+            &self.resources,
             &mut self.dirty,
             &mut self.region_dirty,
             &mut self.tiles,
@@ -920,9 +997,10 @@ impl GpuEmailRenderer {
         height: u32,
         scale: f32,
     ) -> Result<Option<RenderedEmail>, String> {
-        if self.suspended {
+        if self.backend.borrow().suspended {
             return Ok(None);
         }
+        self.catch_up_with_device();
         let start = render_timings_enabled().then(Instant::now);
         let layouts = self.layout_count;
         let tiles = self.tile_count;
@@ -994,6 +1072,7 @@ impl GpuEmailRenderer {
         };
         drain_email_updates(
             email,
+            &self.resources,
             &mut self.dirty,
             &mut self.region_dirty,
             &mut self.tiles,
@@ -1027,7 +1106,7 @@ impl GpuEmailRenderer {
         if self.paint_dirty {
             invalidate_selection_tiles(
                 &email.document,
-                &self.painted_selection,
+                &self.painted_marks,
                 &mut self.tiles,
                 self.tile_height,
             );
@@ -1071,6 +1150,8 @@ impl GpuEmailRenderer {
             (y + tile_height <= top || y >= bottom, *index)
         });
         let mut rendered = 0;
+        let mut backend = self.backend.borrow_mut();
+        let backend = &mut *backend;
         for index in ordered {
             if self.tiles.contains_key(&index) {
                 continue;
@@ -1079,8 +1160,8 @@ impl GpuEmailRenderer {
                 break;
             }
             let tile = render_cpu_tile_cached(
-                &mut self.cpu_painter,
-                &mut self.cpu_size,
+                &mut backend.cpu_painter,
+                &mut backend.cpu_size,
                 email,
                 canvas_width,
                 self.content_height,
@@ -1096,7 +1177,7 @@ impl GpuEmailRenderer {
         self.last_size = Some(size);
         self.dirty = false;
         self.paint_dirty = false;
-        self.painted_selection = email.document.get_text_selection_ranges();
+        self.painted_marks = PaintedMarks::of(&email.document);
         self.region_dirty = wanted.clone().any(|index| !self.tiles.contains_key(&index));
         Ok(Some(RenderedEmail {
             tiles: self.tiles.values().cloned().collect(),
@@ -1115,9 +1196,10 @@ impl GpuEmailRenderer {
         height: f32,
         scale: f32,
     ) -> Result<Option<RenderedEmail>, String> {
-        if self.suspended || self.email.is_none() {
+        if self.backend.borrow().suspended || self.email.is_none() {
             return Ok(None);
         }
+        self.catch_up_with_device();
         let start = render_timings_enabled().then(Instant::now);
         let layouts = self.layout_count;
         let tiles = self.tile_count;
@@ -1189,6 +1271,7 @@ impl GpuEmailRenderer {
 
         drain_email_updates(
             email,
+            &self.resources,
             &mut self.dirty,
             &mut self.region_dirty,
             &mut self.tiles,
@@ -1206,7 +1289,7 @@ impl GpuEmailRenderer {
         if self.paint_dirty {
             invalidate_selection_tiles(
                 &email.document,
-                &self.painted_selection,
+                &self.painted_marks,
                 &mut self.tiles,
                 self.tile_height,
             );
@@ -1235,6 +1318,8 @@ impl GpuEmailRenderer {
         );
         self.tiles
             .retain(|index, _| wanted.clone().any(|wanted| wanted == *index));
+        let mut backend = self.backend.borrow_mut();
+        let backend = &mut *backend;
         for index in wanted {
             if self.tiles.contains_key(&index) {
                 continue;
@@ -1272,7 +1357,7 @@ impl GpuEmailRenderer {
                 y: logical_y as f64,
             });
             let scene_start = render_timings_enabled().then(Instant::now);
-            let mut painter = VelloScenePainter::new(&mut self.scene);
+            let mut painter = VelloScenePainter::new(&mut backend.scene);
             paint_scene_cached(
                 &mut painter,
                 &mut email.document,
@@ -1287,14 +1372,14 @@ impl GpuEmailRenderer {
 
             let scene_elapsed = scene_start.map(|start| start.elapsed());
 
-            let render_result = self
+            let render_result = backend
                 .renderer
                 .as_mut()
                 .ok_or_else(|| "Vello renderer was not initialized".to_owned())?
                 .render_to_texture(
                     device,
                     queue,
-                    &self.scene,
+                    &backend.scene,
                     &texture_view,
                     &vello::RenderParams {
                         base_color: email.appearance.colors.canvas(),
@@ -1310,9 +1395,9 @@ impl GpuEmailRenderer {
                     start.elapsed().saturating_sub(scene_elapsed).as_secs_f64() * 1000.0
                 );
             }
-            self.scene.reset();
+            backend.scene.reset();
             if let Err(error) = render_result {
-                self.renderer = None;
+                backend.renderer = None;
                 return Err(format!("could not render email tile with Vello: {error:?}"));
             }
             let image = slint::Image::try_from(texture)
@@ -1330,7 +1415,7 @@ impl GpuEmailRenderer {
         self.last_size = Some(size);
         self.dirty = false;
         self.paint_dirty = false;
-        self.painted_selection = email.document.get_text_selection_ranges();
+        self.painted_marks = PaintedMarks::of(&email.document);
         self.region_dirty = false;
 
         Ok(Some(RenderedEmail {
@@ -1519,18 +1604,70 @@ fn render_cpu_tile_cached(
     })
 }
 
+/// What the tiles show of the selection and of highlighted text, so that a
+/// change repaints only the tiles it reaches.
+#[derive(Default)]
+struct PaintedMarks {
+    selection: Vec<(NodeId, usize, usize)>,
+    /// The inline root the selection ends in, which is the one without a
+    /// selected line break at its end.
+    selection_end: Option<NodeId>,
+    highlights: Vec<blitz_dom::TextHighlight>,
+}
+
+impl PaintedMarks {
+    fn of(document: &HtmlDocument) -> Self {
+        let (selection, selection_end) = document.get_text_selection_ranges_and_end();
+        Self {
+            selection,
+            selection_end,
+            highlights: document.text_highlights().to_vec(),
+        }
+    }
+}
+
 fn invalidate_selection_tiles(
     document: &HtmlDocument,
-    previous: &[(NodeId, usize, usize)],
+    previous: &PaintedMarks,
     tiles: &mut BTreeMap<u32, RenderedEmailTile>,
     tile_height: f32,
 ) {
-    let current = document.get_text_selection_ranges();
+    let current = PaintedMarks::of(document);
+    let ends = if current.selection_end == previous.selection_end {
+        Vec::new()
+    } else {
+        [current.selection_end, previous.selection_end]
+            .into_iter()
+            .flatten()
+            .collect()
+    };
     let changed = previous
+        .selection
         .iter()
-        .filter(|r| !current.contains(r))
-        .chain(current.iter().filter(|r| !previous.contains(r)));
-    for &(id, _, _) in changed {
+        .filter(|r| !current.selection.contains(r))
+        .chain(
+            current
+                .selection
+                .iter()
+                .filter(|r| !previous.selection.contains(r)),
+        )
+        .map(|&(id, _, _)| id)
+        .chain(ends)
+        .chain(
+            previous
+                .highlights
+                .iter()
+                .filter(|h| !current.highlights.contains(h))
+                .chain(
+                    current
+                        .highlights
+                        .iter()
+                        .filter(|h| !previous.highlights.contains(h)),
+                )
+                .map(|highlight| highlight.node),
+        )
+        .collect::<Vec<_>>();
+    for id in changed {
         let Some(node) = document.get_node(id) else {
             tiles.clear();
             return;
@@ -1544,14 +1681,43 @@ fn invalidate_selection_tiles(
     }
 }
 
+/// Images the reader won't load, such as blocked remote images and ones past
+/// its limits or failing to load, are failed in the document, which lays them
+/// out with their alt text, as browsers lay out an image they can't show.
+fn fail_unavailable_images(email: &mut PreparedEmail, ledger: &crate::remote::ResourceLedger) {
+    use crate::remote::ResourceState;
+    let id = email.document.id();
+    let unavailable: Vec<String> = {
+        let states = ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        email
+            .document
+            .pending_image_urls()
+            .filter(|url| {
+                matches!(
+                    states.get(&crate::remote::resource_key(id, url)),
+                    Some(ResourceState::Blocked | ResourceState::Limited | ResourceState::Failed)
+                )
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    for url in unavailable {
+        email.document.fail_image(&url);
+    }
+}
+
 fn drain_email_updates(
     email: &mut PreparedEmail,
+    ledger: &crate::remote::ResourceLedger,
     dirty: &mut bool,
     region_dirty: &mut bool,
     tiles: &mut BTreeMap<u32, RenderedEmailTile>,
     metadata_revision: &mut u64,
     tile_height: f32,
 ) -> bool {
+    fail_unavailable_images(email, ledger);
     let updates = email.document.drain_pending_updates();
     *dirty |= updates.layout;
     if updates.changed {
@@ -1949,6 +2115,25 @@ fn create_email_font_ctx_with_han_fallback(system_fonts: bool) -> EmailFontCtx {
         .collection
         .set_generic_families(GenericFamily::SansSerif, sans_families.into_iter());
 
+    // `pre`, `code`, `kbd` and `samp` are plain `monospace`, as in browsers,
+    // which then size them at 13px where text is 16px; a named family would
+    // keep them at 16px. The generic family prefers these fonts instead.
+    let mut mono_families: Vec<_> = ["DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono"]
+        .into_iter()
+        .filter_map(|name| font_ctx.collection.family_id(name))
+        .collect();
+    for family in font_ctx
+        .collection
+        .generic_families(GenericFamily::Monospace)
+    {
+        if !mono_families.contains(&family) {
+            mono_families.push(family);
+        }
+    }
+    font_ctx
+        .collection
+        .set_generic_families(GenericFamily::Monospace, mono_families.into_iter());
+
     // Runs with only an unavailable named family resolve through script
     // fallback. Cover Latin plus Common, which contains digits and punctuation.
     for script in [*b"Latn", *b"Zyyy"] {
@@ -2048,7 +2233,7 @@ fn prepare_email_html_at_with_font_ctx(
 ) -> Result<PreparedEmail, String> {
     let started = render_timings_enabled().then(Instant::now);
     let (html, notice) = crate::email_document::bounded_html(html);
-    let html = with_email_font_fallback(&html);
+    let html = html_parser_input(&with_email_font_fallback(&html));
     struct PreparationAbort(Option<blitz_traits::net::AbortController>);
     impl Drop for PreparationAbort {
         fn drop(&mut self) {
@@ -2083,6 +2268,7 @@ fn prepare_email_html_at_with_font_ctx(
         }
     }
     details::prepare(&mut document);
+    embedded::prepare(&mut document);
     let mut appearance = AppearanceDocument::new(appearance);
     appearance.resolve(&mut document);
     let links = collect_email_links(&document, width as f32 / scale);
@@ -2126,13 +2312,36 @@ pub fn has_remote_images(html: &str) -> bool {
     crate::email_document::has_remote_images(html)
 }
 
+/// Put the reader's fallback fonts first in the document's head: the email's
+/// own `font-family` rules come after them and win, as they would over a
+/// browser's defaults.
+/// Mail is `text/html`, which browsers parse as HTML whatever its doctype.
+/// Blitz parses a document as XML when it starts with an XHTML doctype, an XML
+/// declaration or an XHTML `<html>`, and there a `<br>` or `<img>` without a
+/// closing slash swallows the content after it. An HTML doctype on a line of
+/// its own in front keeps it HTML (the check reads the first line), and the
+/// HTML parser ignores the message's own doctype after it.
+fn html_parser_input(html: &str) -> String {
+    let html = html.strip_prefix('\u{feff}').unwrap_or(html);
+    format!("<!DOCTYPE html>\n{html}")
+}
+
 fn with_email_font_fallback(html: &str) -> String {
     let lower = html.to_ascii_lowercase();
-    if let Some(head_end) = lower.find("</head>") {
+    // The end of the `<head>` start tag, not of a `<header>`.
+    let head_start_end = lower.match_indices("<head").find_map(|(start, tag)| {
+        let after = start + tag.len();
+        let rest = &lower[after..];
+        if !rest.starts_with(|c: char| c == '>' || c == '/' || c.is_ascii_whitespace()) {
+            return None;
+        }
+        rest.find('>').map(|end| after + end + 1)
+    });
+    if let Some(head_start_end) = head_start_end {
         let mut output = String::with_capacity(html.len() + EMAIL_FONT_FALLBACK_STYLE.len());
-        output.push_str(&html[..head_end]);
+        output.push_str(&html[..head_start_end]);
         output.push_str(EMAIL_FONT_FALLBACK_STYLE);
-        output.push_str(&html[head_end..]);
+        output.push_str(&html[head_start_end..]);
         output
     } else if let Some(open_end) = lower.find("<body") {
         let mut output = String::with_capacity(html.len() + EMAIL_FONT_FALLBACK_STYLE.len());
@@ -2350,6 +2559,23 @@ mod tests {
     use crate::mail::fixtures;
 
     #[test]
+    fn email_font_rules_come_after_the_fallback_fonts() {
+        // The reader's fallback fonts are a default: the email's own rules for
+        // the same elements come later in the cascade and win.
+        for html in [
+            "<html><head><style>body{font-family:Georgia}</style></head><body>x</body></html>",
+            "<html><HEAD lang='en'><style>body{font-family:Georgia}</style></HEAD></html>",
+        ] {
+            let html = super::with_email_font_fallback(html);
+            let fallback = html.find("data-flectar-mail=\"font-fallback\"").unwrap();
+            assert!(fallback < html.find("Georgia").unwrap(), "{html}");
+        }
+        // A <header> isn't the head.
+        let html = super::with_email_font_fallback("<body><header>x</header></body>");
+        assert!(html.starts_with("<head>"), "{html}");
+    }
+
+    #[test]
     fn email_font_ctx_prefers_helvetica_neue_for_sans_serif_when_installed() {
         use parley::fontique::GenericFamily;
 
@@ -2363,6 +2589,45 @@ mod tests {
             .generic_families(GenericFamily::SansSerif)
             .next();
         assert_eq!(first, Some(helvetica_neue));
+    }
+
+    #[test]
+    fn code_is_sized_like_browsers_size_monospace() {
+        use parley::fontique::GenericFamily;
+
+        // Browsers size plain `monospace` text at 13px where other text is
+        // 16px, unless the family list names more than that one generic.
+        let mut prepared = prepare_email_html(
+            r#"<pre id="pre">x</pre><p><code id="code">y</code></p><p><code id="named" style="font-family: monospace, monospace">z</code></p>"#,
+        )
+        .unwrap();
+        prepared.document.resolve(0.0);
+        let font_size = |id: &str| {
+            let node_id = prepared
+                .document
+                .query_selector(&format!("#{id}"))
+                .unwrap()
+                .unwrap();
+            let node = prepared.document.get_node(node_id).unwrap();
+            node.primary_styles()
+                .unwrap()
+                .get_font()
+                .font_size
+                .computed_size()
+                .px()
+        };
+        assert_eq!(font_size("pre"), 13.0);
+        assert_eq!(font_size("code"), 13.0);
+        assert_eq!(font_size("named"), 16.0);
+
+        let mut font_ctx = super::build_email_font_ctx();
+        if let Some(dejavu) = font_ctx.collection.family_id("DejaVu Sans Mono") {
+            let first = font_ctx
+                .collection
+                .generic_families(GenericFamily::Monospace)
+                .next();
+            assert_eq!(first, Some(dejavu));
+        }
     }
 
     #[test]
@@ -2456,10 +2721,10 @@ mod tests {
         let mut renderer = GpuEmailRenderer::default();
         renderer.set_email(prepare_email_html("<p>First message</p>").unwrap());
         renderer.clear();
-        assert_eq!(renderer.gpu_teardown_count, 0);
+        assert_eq!(renderer.backend.borrow().gpu_teardown_count, 0);
 
         renderer.teardown_gpu();
-        assert_eq!(renderer.gpu_teardown_count, 1);
+        assert_eq!(renderer.backend.borrow().gpu_teardown_count, 1);
     }
 
     #[test]
@@ -2543,10 +2808,10 @@ mod tests {
             .unwrap();
         let positions: Vec<_> = frame.tiles.iter().map(|t| (t.y, t.height)).collect();
         drop(frame);
-        assert!(renderer.cpu_painter.is_some());
+        assert!(renderer.backend.borrow().cpu_painter.is_some());
         renderer.set_suspended(true);
         assert!(renderer.tiles.is_empty());
-        assert!(renderer.cpu_painter.is_none());
+        assert!(renderer.backend.borrow().cpu_painter.is_none());
         assert!(renderer.has_document());
         assert!(!renderer.needs_repaint());
         assert!(

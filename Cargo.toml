@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/flectar-mail-core", "crates/flectar-proton-bridge", "crates/flectar-spell", "crates/renderer-probe"]
-exclude = ["crates/blitz-dom", "crates/blitz-paint", "crates/fontique", "crates/i-slint-backend-android-activity", "crates/i-slint-backend-winit", "crates/i-slint-renderer-software", "crates/jmap-client", "crates/kem-pre", "crates/ml-kem-0.2", "crates/proton-rpgp", "crates/smithay-clipboard", "crates/spellbook", "crates/vello"]
+exclude = ["crates/blitz-dom", "crates/blitz-paint", "crates/fontique", "crates/i-slint-backend-android-activity", "crates/i-slint-backend-winit", "crates/i-slint-core", "crates/i-slint-renderer-software", "crates/jmap-client", "crates/kem-pre", "crates/ml-kem-0.2", "crates/proton-rpgp", "crates/smithay-clipboard", "crates/spellbook", "crates/vello"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -23,14 +23,17 @@ smithay-clipboard = { path = "crates/smithay-clipboard" }
 # Slint 1.19's software renderer panics on a rounded clip far out of view; see
 # patches/slint-renderer-software/README.md.
 i-slint-renderer-software = { path = "crates/i-slint-renderer-software" }
+# Slint 1.19 stops a fling when the system asks for less motion, so lists
+# stop dead where the finger lifts; see patches/slint-core/README.md.
+i-slint-core = { path = "crates/i-slint-core" }
 # Fontique 0.12 slants italics from a font's `slnt` axis the wrong way, so
 # variable fonts without an italic face, such as the bundled Google Sans Flex,
 # stay upright; see patches/fontique/README.md.
 fontique = { path = "crates/fontique" }
 # Vello drops Calibri's letters on the GPU; see patches/vello/README.md.
 vello = { path = "crates/vello" }
-# jmap-client makes its own HTTP clients, which can't take the app's proxy; see
-# patches/jmap-client/README.md.
+# jmap-client makes its own HTTP clients, which can't take the app's proxy and
+# TLS settings; see patches/jmap-client/README.md.
 jmap-client = { path = "crates/jmap-client" }
 # Proton's OpenPGP backend and the ML-KEM it builds on pin a prerelease of
 # kem that Cargo can't keep beside the kem 0.3 Flectar Mail Sync uses; see
@@ -83,7 +86,9 @@ ios = ["slint/renderer-skia"]
 pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
 anyrender = "0.14"
 anyrender_vello = { version = "0.15", optional = true }
-anyrender_vello_cpu = "0.18"
+# Filters blur text shadows. src/renderer/cpu_scene.rs passes on only the
+# filters vello_cpu runs.
+anyrender_vello_cpu = { version = "0.18", features = ["filters"] }
 # AnyRender's geometry and paint types, for the scene adapter in
 # src/renderer/cpu_scene.rs.
 kurbo = "0.13.1"
@@ -162,12 +167,17 @@ windows-sys = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Networking_WinHttp",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Isolation",
+    "Win32_Storage_FileSystem",
     "Win32_Storage_Packaging_Appx",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
@@ -176,8 +186,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 # The Microsoft Store build's startup task and new-mail toasts are WinRT
-# APIs, as are the accent colours of the taskbar's unread count; the toast
-# activator is a COM server. Slint and wgpu already build
+# APIs, as are the accent colours of the taskbar's unread count and the
+# connection's cost (src/platform/metered); the toast activator is a COM
+# server. Slint and wgpu already build
 # this version of the crate.
 windows = { version = "0.62", default-features = false, features = [
     "std",
@@ -185,13 +196,19 @@ windows = { version = "0.62", default-features = false, features = [
     "Data_Xml_Dom",
     "Foundation",
     "Foundation_Collections",
+    "Networking_Connectivity",
     "UI_Notifications",
     "UI_ViewManagement",
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
     "Win32_UI_Notifications",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # `windows::core::implement` expands to paths in this crate.
@@ -241,7 +258,7 @@ slint = { version = "1.19.0", default-features = false, features = ["backend-win
 # These AppKit bindings are already in the build.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSAccessibility", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSImage", "NSResponder", "NSRunningApplication", "NSSpellChecker", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSAccessibility", "NSApplication", "NSButton", "NSControl", "NSDockTile", "NSImage", "NSResponder", "NSRunningApplication", "NSScreen", "NSSpellChecker", "NSView", "NSWindow", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSAppleEventManager", "NSArray", "NSBundle", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSNotification", "NSOperation", "NSOrthography", "NSRange", "NSSet", "NSString", "NSTextCheckingResult", "NSURL", "NSUserDefaults"] }
 # Launch Services reports a default email app change through a block.
 block2 = { version = "0.6", default-features = false, features = ["std"] }

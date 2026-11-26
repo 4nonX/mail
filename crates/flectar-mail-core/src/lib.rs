@@ -301,6 +301,16 @@ fn normalize_account_email(value: &str) -> Option<String> {
 
 /// Rules every account created from portable or migrated settings must
 /// satisfy. Interactive setup checks the same fields as the user types them.
+/// The cards of a contacts file, read off the async runtime: a large file
+/// takes a while.
+async fn read_contact_file(
+    file: Vec<u8>,
+) -> Result<std::result::Result<carddav::import::ImportedCards, ContactFileProblem>> {
+    tokio::task::spawn_blocking(move || carddav::import::read(&file))
+        .await
+        .map_err(|error| CoreError::Other(error.to_string()))
+}
+
 pub(crate) fn validate_portable_account(config: &PortableAccountConfig) -> Result<()> {
     net::tls::trusted_certificates(&config.settings.connection.trusted_certificate_pem)?;
     let email = config.email.trim();
@@ -401,6 +411,33 @@ fn folder_path_delimiter(protocol: MailProtocol, folder: &repo::folders::Folder)
 
 /// Why account `config` chooses no folders for its roles: its provider
 /// gives them (#252).
+/// A folder's name after its parents' names, outermost first: IMAP names
+/// are whole paths, as "Archive/2026".
+fn folder_names(folder: &FolderInfo) -> Vec<String> {
+    match folder.delimiter.as_deref().filter(|d| !d.is_empty()) {
+        Some(delimiter) => folder
+            .display_name
+            .split(delimiter)
+            .map(str::to_owned)
+            .collect(),
+        None => vec![folder.display_name.clone()],
+    }
+}
+
+/// Folder names to sort by, so parents come before the folders in them.
+fn lowercase_names(names: &[String]) -> Vec<String> {
+    names.iter().map(|name| name.to_lowercase()).collect()
+}
+
+/// Whether an account's folders can be hidden (#253): Gmail's labels are
+/// its own, and mail kept on this device has no settings to show them again.
+fn hides_folders(protocol: MailProtocol) -> bool {
+    matches!(
+        protocol,
+        MailProtocol::Imap | MailProtocol::Jmap | MailProtocol::Pop3
+    )
+}
+
 fn not_imap_folder_roles(config: &AccountConfig) -> CoreError {
     CoreError::Other(format!(
         "{} keeps the folders its provider gives each role",
@@ -1004,6 +1041,9 @@ pub struct Core {
     transfers: Arc<tokio::sync::Notify>,
     /// Wakes the loop that downloads attachments ahead of time (#253).
     prefetch: Arc<tokio::sync::Notify>,
+    /// Whether downloading ahead of time waits on a metered connection
+    /// (#253).
+    metered: Arc<net::metered::Metered>,
     /// Flectar Mail Sync: this device's setup kept the same on the user's other
     /// devices.
     device_sync: Arc<device_sync::Service>,
@@ -1126,6 +1166,7 @@ impl Core {
             ai_router_lock: Arc::new(tokio::sync::Mutex::new(())),
             transfers: Arc::new(tokio::sync::Notify::new()),
             prefetch: Arc::new(tokio::sync::Notify::new()),
+            metered: Arc::default(),
             device_sync: Arc::new(device_sync::Service::new()),
             accounts_started: Arc::new(tokio::sync::watch::Sender::new(false)),
             missed_since: Arc::new(std::sync::Mutex::new(Some(missed_since))),
@@ -1167,6 +1208,8 @@ impl Core {
         // needs a token refresh.
         let settings = core.db.read(|conn| repo::settings::get(conn)).await?;
         apply_oauth_settings(&settings);
+        core.metered
+            .set_pause(settings.pause_downloads_when_metered);
         // And the proxy settings before any connection opens.
         core.load_proxy_settings().await?;
 
@@ -1501,6 +1544,7 @@ impl Core {
             tokens: self.tokens.clone(),
             credentials: self.credentials.clone(),
             pace: self.pace.clone(),
+            metered: self.metered.clone(),
         }
     }
 
@@ -2088,25 +2132,10 @@ impl Core {
                     .iter()
                     .map(|folder| FolderChoice {
                         id: folder.id,
-                        // IMAP names are whole paths, as "Archive/2026".
-                        names: match folder.delimiter.as_deref().filter(|d| !d.is_empty()) {
-                            Some(delimiter) => folder
-                                .display_name
-                                .split(delimiter)
-                                .map(str::to_owned)
-                                .collect(),
-                            None => vec![folder.display_name.clone()],
-                        },
+                        names: folder_names(folder),
                     })
                     .collect::<Vec<_>>();
-                folders.sort_by_cached_key(|folder| {
-                    let names = folder
-                        .names
-                        .iter()
-                        .map(|name| name.to_lowercase())
-                        .collect::<Vec<_>>();
-                    (names, folder.id)
-                });
+                folders.sort_by_cached_key(|folder| (lowercase_names(&folder.names), folder.id));
                 let chosen = &config.settings.folder_roles;
                 let detected = repo::folders::detected_roles(conn, account_id)?;
                 let roles = repo::folders::CHOOSABLE_ROLES
@@ -2194,6 +2223,161 @@ impl Core {
             handle.update_settings(settings);
         }
         self.bus.emit(CoreEvent::MailUpdated { thread_ids: vec![] });
+        Ok(())
+    }
+
+    /// An account's folders as Settings lists them to choose which show, the
+    /// Inbox first and parents before the folders in them (#253).
+    pub async fn account_folders(&self, account_id: i64) -> Result<Vec<AccountFolder>> {
+        self.db
+            .read(move |conn| {
+                let config = repo::accounts::get_config(conn, account_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("account {account_id}")))?;
+                if !hides_folders(config.mail_protocol) {
+                    return Err(CoreError::Other(format!(
+                        "{} shows the folders its provider gives",
+                        config.email
+                    )));
+                }
+                let hidden_ids = repo::folders::hidden_ids(conn, Some(account_id))?;
+                // Only IMAP accounts sync folder by folder.
+                let imap = config.mail_protocol == MailProtocol::Imap;
+                let mut folders = repo::folders::list_info(conn, Some(account_id))?
+                    .into_iter()
+                    .map(|folder| {
+                        let role = folder.role.as_deref();
+                        let always_shown = repo::folders::always_shown(&folder.path, role);
+                        let hidden =
+                            !always_shown && config.settings.hidden_folders.contains(&folder.path);
+                        let always_synced = repo::folders::always_synced(&folder.path, role);
+                        AccountFolder {
+                            id: folder.id,
+                            names: folder_names(&folder),
+                            always_shown,
+                            hidden,
+                            inside_hidden: !hidden && hidden_ids.contains(&folder.id),
+                            synced: always_synced
+                                || !config.settings.unsynced_folders.contains(&folder.path),
+                            always_synced,
+                            syncable: imap && folder.selectable && role != Some(roles::ALL),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                folders.sort_by_cached_key(|folder| {
+                    let inbox =
+                        folder.names.len() == 1 && folder.names[0].eq_ignore_ascii_case("INBOX");
+                    (!inbox, lowercase_names(&folder.names), folder.id)
+                });
+                Ok(folders)
+            })
+            .await
+    }
+
+    /// Hide a folder, with the folders in it, from the sidebar and the Move
+    /// to list, or show it again (#253). Its mail still syncs, and the other
+    /// devices of Flectar Mail Sync hide it too.
+    pub async fn set_folder_hidden(&self, folder_id: i64, hidden: bool) -> Result<()> {
+        let (account_id, settings) = self
+            .db
+            .write(move |conn| {
+                let tx = conn.transaction()?;
+                let folder = repo::folders::get(&tx, folder_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("folder {folder_id}")))?;
+                if repo::folders::always_shown(&folder.path, folder.role.as_deref()) {
+                    return Err(CoreError::Other(
+                        "the Inbox and the folders for Sent, Drafts and the like always show"
+                            .into(),
+                    ));
+                }
+                let mut config = repo::accounts::get_config(&tx, folder.account_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("account {}", folder.account_id)))?;
+                if !hides_folders(config.mail_protocol) {
+                    return Err(CoreError::Other(format!(
+                        "{} shows the folders its provider gives",
+                        config.email
+                    )));
+                }
+                if hidden {
+                    config.settings.hidden_folders.insert(folder.path);
+                } else {
+                    config.settings.hidden_folders.remove(&folder.path);
+                }
+                repo::accounts::set_settings(&tx, folder.account_id, &config.settings)?;
+                tx.commit()?;
+                Ok((folder.account_id, config.settings))
+            })
+            .await?;
+        if let Some(handle) = self.handles.read().await.get(&account_id).cloned() {
+            handle.update_settings(settings);
+        }
+        self.bus.emit(CoreEvent::MailUpdated { thread_ids: vec![] });
+        Ok(())
+    }
+
+    /// Choose whether this device syncs a folder of an IMAP account in the
+    /// background (#253). One left out is checked when it's opened, and keeps
+    /// the mail it has. The Inbox, Sent and Drafts always sync.
+    pub async fn set_folder_synced(&self, folder_id: i64, synced: bool) -> Result<()> {
+        let (account_id, settings) = self
+            .db
+            .write(move |conn| {
+                let tx = conn.transaction()?;
+                let folder = repo::folders::get(&tx, folder_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("folder {folder_id}")))?;
+                let mut config = repo::accounts::get_config(&tx, folder.account_id)?
+                    .ok_or_else(|| CoreError::NotFound(format!("account {}", folder.account_id)))?;
+                if config.mail_protocol != MailProtocol::Imap {
+                    return Err(CoreError::Other(format!(
+                        "{} syncs all its folders together",
+                        config.email
+                    )));
+                }
+                if repo::folders::always_synced(&folder.path, folder.role.as_deref()) {
+                    return Err(CoreError::Other(
+                        "the Inbox, Sent and Drafts always sync".into(),
+                    ));
+                }
+                if synced {
+                    config.settings.unsynced_folders.remove(&folder.path);
+                } else {
+                    config.settings.unsynced_folders.insert(folder.path);
+                }
+                repo::accounts::set_settings(&tx, folder.account_id, &config.settings)?;
+                tx.commit()?;
+                Ok((folder.account_id, config.settings))
+            })
+            .await?;
+        // The worker syncs as the settings now say, catching a folder synced
+        // again up at once.
+        if let Some(handle) = self.handles.read().await.get(&account_id).cloned() {
+            handle.update_settings(settings);
+        }
+        self.prefetch.notify_one();
+        Ok(())
+    }
+
+    /// Check a folder this device leaves out of its sync, as it's opened
+    /// (#253). Other folders sync anyway, so this does nothing for them.
+    pub async fn check_folder(&self, folder_id: i64) -> Result<()> {
+        let folder = self
+            .db
+            .read(move |conn| {
+                let Some(folder) = repo::folders::get(conn, folder_id)? else {
+                    return Ok(None);
+                };
+                let unsynced = repo::accounts::get_config(conn, folder.account_id)?
+                    .filter(|config| config.mail_protocol == MailProtocol::Imap)
+                    .is_some_and(|config| {
+                        !repo::folders::syncs(&folder, &config.settings.unsynced_folders)
+                    });
+                Ok(unsynced.then_some(folder))
+            })
+            .await?;
+        if let Some(folder) = folder
+            && let Some(handle) = self.handles.read().await.get(&folder.account_id).cloned()
+        {
+            handle.check_folder(folder.id);
+        }
         Ok(())
     }
 
@@ -4331,11 +4515,85 @@ impl Core {
         self.load_body(message_id, None).await
     }
 
+    /// Read a kept body again when it was read before the body showed the
+    /// messages a message carries (#455): from the original kept on this
+    /// device, or else from the server, while the kept body still shows.
+    /// Mail with neither keeps the body it has.
+    async fn read_body_again(&self, message_id: i64) {
+        let Ok(Some((account_id, raw_path))) = self
+            .db
+            .read(move |conn| repo::messages::body_to_read_again(conn, message_id))
+            .await
+        else {
+            return;
+        };
+        if let Some(raw_path) = raw_path {
+            match self
+                .read_original(
+                    account_id,
+                    message_id,
+                    &raw_path,
+                    MAX_CACHED_MESSAGE_BYTES,
+                    "cached message",
+                )
+                .await
+            {
+                Ok(raw) => {
+                    let parsed = crate::sync::ingest::parse_or_text(&raw);
+                    let stored = self
+                        .db
+                        .write(move |conn| {
+                            let tx = conn.transaction()?;
+                            let mut thread_ids = crate::sync::ingest::store_body(
+                                &tx, message_id, &raw_path, &parsed,
+                            )?;
+                            repo::messages::body_read_again(&tx, message_id)?;
+                            if let Some(thread_id) = repo::messages::get_row(&tx, message_id)?
+                                .and_then(|row| row.thread_id)
+                            {
+                                repo::threads::recompute(&tx, thread_id)?;
+                                if !thread_ids.contains(&thread_id) {
+                                    thread_ids.push(thread_id);
+                                }
+                            }
+                            tx.commit()?;
+                            Ok(thread_ids)
+                        })
+                        .await;
+                    match stored {
+                        Ok(thread_ids) => self.bus.emit(CoreEvent::MailUpdated { thread_ids }),
+                        Err(error) => {
+                            tracing::warn!(message_id, %error, "could not read a kept body again");
+                        }
+                    }
+                    return;
+                }
+                Err(error) => {
+                    tracing::debug!(message_id, %error, "the original of a kept body is unavailable");
+                }
+            }
+        }
+        let protocol = self.account_protocol(account_id).await;
+        let result = self
+            .db
+            .write(move |conn| match protocol {
+                Ok(MailProtocol::Imap | MailProtocol::Gmail | MailProtocol::Jmap) => {
+                    repo::messages::fetch_body_again(conn, message_id)
+                }
+                _ => repo::messages::body_read_again(conn, message_id),
+            })
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(message_id, %error, "could not ask for a kept body again");
+        }
+    }
+
     async fn load_body(
         &self,
         message_id: i64,
         preview_thread: Option<i64>,
     ) -> Result<MessageDetail> {
+        self.read_body_again(message_id).await;
         let (mut detail, cached_raw_path) = self
             .db
             .read(move |conn| {
@@ -4358,10 +4616,16 @@ impl Core {
             && let Ok(headers) = crate::mime::parse_header_block(&raw)
             && headers.sender_verification.is_verified()
         {
-            let verification = headers.sender_verification;
-            self.db
+            let verification = self
+                .db
                 .write(move |conn| {
-                    repo::messages::set_sender_verification(conn, message_id, verification)
+                    let verification = repo::messages::vouched_for_message(
+                        conn,
+                        message_id,
+                        headers.sender_verification,
+                    )?;
+                    repo::messages::set_sender_verification(conn, message_id, verification)?;
+                    Ok(verification)
                 })
                 .await?;
             detail.sender_verification = verification;
@@ -4612,10 +4876,15 @@ impl Core {
         &self,
         message_id: i64,
     ) -> Result<Option<(MessageDetail, unsubscribe::UnsubscribePlan)>> {
-        let (detail, raw_path, local, receive_only) = self
+        let (detail, raw_path, local, receive_only, stamped) = self
             .db
             .read(move |conn| {
                 let detail = repo::messages::detail(conn, message_id)?;
+                // The signature check below reads the topmost
+                // Authentication-Results, which only a server that stamps
+                // the mail it receives makes its own.
+                let stamped =
+                    repo::messages::trusts_authentication_results(conn, detail.account_id)?;
                 let raw_path =
                     repo::messages::get_row(conn, message_id)?.and_then(|row| row.raw_path);
                 let config = repo::accounts::get_config(conn, detail.account_id)?;
@@ -4624,7 +4893,7 @@ impl Core {
                     .is_some_and(|account| account.mail_protocol == MailProtocol::Local);
                 // An account that only receives can't send a request by mail.
                 let receive_only = config.filter(|config| !local && !config.sends_mail());
-                Ok((detail, raw_path, local, receive_only))
+                Ok((detail, raw_path, local, receive_only, stamped))
             })
             .await?;
         // Answering spam only tells its sender the address is read, and
@@ -4636,12 +4905,12 @@ impl Core {
             return Ok(None);
         };
         let one_click = match &raw_path {
-            Some(raw_path) => {
+            Some(raw_path) if stamped => {
                 crate::file_io::read_headers(raw_path, MAX_CACHED_HEADER_BYTES, "cached headers")
                     .await
                     .is_ok_and(|raw| crate::mime::one_click_signed(&raw))
             }
-            None => false,
+            _ => false,
         };
         match unsubscribe::plan(&list_unsubscribe, one_click, receive_only.is_none()) {
             Some(plan) => Ok(Some((detail, plan))),
@@ -5219,6 +5488,20 @@ impl Core {
     pub async fn list_folders(&self, account_id: Option<i64>) -> Result<Vec<FolderInfo>> {
         self.db
             .read(move |conn| repo::folders::list_info(conn, account_id))
+            .await
+    }
+
+    /// The folders the sidebar and the Move to list show: all but the hidden
+    /// ones and the folders in them (#253).
+    pub async fn list_shown_folders(&self, account_id: Option<i64>) -> Result<Vec<FolderInfo>> {
+        self.db
+            .read(move |conn| {
+                let hidden = repo::folders::hidden_ids(conn, account_id)?;
+                Ok(repo::folders::list_info(conn, account_id)?
+                    .into_iter()
+                    .filter(|folder| !hidden.contains(&folder.id))
+                    .collect())
+            })
             .await
     }
 
@@ -6354,8 +6637,9 @@ impl Core {
     }
 
     /// Stop a draft's scheduled send. The message stays a draft, to edit or
-    /// schedule again. Returns whether a send was waiting.
-    pub async fn cancel_scheduled_send(&self, draft_id: i64) -> Result<bool> {
+    /// schedule again. Says whether a send was waiting, and whether another
+    /// of the user's devices may still send it.
+    pub async fn cancel_scheduled_send(&self, draft_id: i64) -> Result<CancelledSend> {
         // One the mail server holds is cancelled there.
         if let Some(action) = self
             .db
@@ -6364,34 +6648,18 @@ impl Core {
         {
             self.unhold_send(action).await?;
             self.forget_reply_reminder(draft_id).await;
-            return Ok(true);
+            return Ok(CancelledSend::Cancelled);
         }
+        let group = self.group_view().await;
         let (cancelled, thread, shared) = self
             .db
             .write(move |conn| {
                 let tx = conn.transaction()?;
                 let cancelled = repo::actions::cancel_draft_send(&tx, draft_id, now_ms())?;
-                // Cancelled on every device.
+                // Cancelled on every device that hears of it.
                 let shared = match cancelled {
-                    Some(action) => match repo::synced_sends::by_action(&tx, action)? {
-                        Some(send) if send.state == repo::synced_sends::SCHEDULED => {
-                            repo::synced_sends::set_state(
-                                &tx,
-                                &send.sync_id,
-                                repo::synced_sends::CANCELLED,
-                                None,
-                                now_ms(),
-                            )?;
-                            repo::synced_sends::set_action(&tx, &send.sync_id, None)?;
-                            // Another device's message kept here is the
-                            // user's draft now: it stays when the send is
-                            // forgotten.
-                            repo::synced_sends::set_shadow(&tx, &send.sync_id, None)?;
-                            true
-                        }
-                        _ => false,
-                    },
-                    None => false,
+                    Some(action) => device_sync::stop_shared_send(&tx, action, &group, now_ms())?,
+                    None => None,
                 };
                 let thread = repo::messages::get_row(&tx, draft_id)?.and_then(|row| row.thread_id);
                 tx.commit()?;
@@ -6403,13 +6671,18 @@ impl Core {
                 thread_ids: vec![thread],
             });
         }
-        if shared {
+        if shared.is_some() {
             self.device_sync_now();
         }
-        if cancelled {
-            self.forget_reply_reminder(draft_id).await;
+        if !cancelled {
+            return Ok(CancelledSend::NotScheduled);
         }
-        Ok(cancelled)
+        self.forget_reply_reminder(draft_id).await;
+        Ok(if shared == Some(true) {
+            CancelledSend::MayStillGoOut
+        } else {
+            CancelledSend::Cancelled
+        })
     }
 
     /// Move a scheduled send to `send_at`. Another device's message changes
@@ -6567,8 +6840,12 @@ impl Core {
                 .read(move |conn| {
                     Ok(conn
                         .query_row(
-                            "SELECT kind, state, last_error, not_before
-                             FROM pending_actions WHERE id = ?1",
+                            &format!(
+                                "SELECT kind, state, last_error, not_before,
+                                        {}
+                                 FROM pending_actions WHERE id = ?1",
+                                repo::actions::SEND_TAKEN
+                            ),
                             rusqlite::params![action_id],
                             |row| {
                                 Ok((
@@ -6576,13 +6853,14 @@ impl Core {
                                     row.get::<_, String>(1)?,
                                     row.get::<_, Option<String>>(2)?,
                                     row.get::<_, Option<i64>>(3)?,
+                                    row.get::<_, bool>(4)?,
                                 ))
                             },
                         )
                         .optional()?)
                 })
                 .await?;
-            let Some((kind, state, last_error, not_before)) = status else {
+            let Some((kind, state, last_error, not_before, taken)) = status else {
                 return Err(CoreError::NotFound("send action".into()));
             };
             if kind != "send" {
@@ -6593,6 +6871,9 @@ impl Core {
 
             match state.as_str() {
                 "done" => return Ok(()),
+                // The mail server took it, so it went out: what is left
+                // only files it, and a failure there is no failure to send.
+                _ if taken => return Ok(()),
                 "failed" => {
                     return Err(CoreError::Other(
                         last_error.unwrap_or_else(|| "message delivery failed".into()),
@@ -7160,18 +7441,21 @@ impl Core {
         Ok(draft)
     }
 
-    pub async fn delete_draft(&self, draft_id: i64) -> Result<()> {
+    /// Delete a draft, and stop its scheduled send. Says whether a send was
+    /// waiting, and whether another of the user's devices may still send it.
+    pub async fn delete_draft(&self, draft_id: i64) -> Result<CancelledSend> {
         // Deleting the Email would not stop the mail server's hold on it
         // (RFC 8621 §7): the hold is cancelled first.
-        if let Some(action) = self
+        let held = self
             .db
             .read(move |conn| repo::actions::held_send_of(conn, draft_id))
-            .await?
-        {
+            .await?;
+        if let Some(action) = held {
             self.unhold_send(action).await?;
         }
         self.forget_reply_reminder(draft_id).await;
-        let (thread_id, nudge_account, staged_paths) = self
+        let group = self.group_view().await;
+        let (thread_id, nudge_account, staged_paths, stopped, shared) = self
             .db
             .write(move |conn| {
                 let row = conn
@@ -7205,11 +7489,16 @@ impl Core {
                     return Err(CoreError::NotFound("draft".into()));
                 }
 
+                // Or its mail server took it, and only filing it is left.
                 let send_inflight = conn.query_row(
-                    "SELECT EXISTS(
-                       SELECT 1 FROM pending_actions
-                       WHERE message_id=?1 AND kind='send' AND state='inflight'
-                     )",
+                    &format!(
+                        "SELECT EXISTS(
+                           SELECT 1 FROM pending_actions
+                           WHERE message_id=?1 AND kind='send'
+                             AND (state='inflight' OR (state='pending' AND {}))
+                         )",
+                        repo::actions::SEND_TAKEN
+                    ),
                     rusqlite::params![draft_id],
                     |query_row| query_row.get::<_, bool>(0),
                 )?;
@@ -7218,11 +7507,30 @@ impl Core {
                         "the draft is currently being submitted and cannot be deleted".into(),
                     ));
                 }
+                let sends = {
+                    let mut statement = conn.prepare(
+                        "SELECT id FROM pending_actions
+                         WHERE message_id=?1 AND kind='send' AND state='pending'",
+                    )?;
+                    statement
+                        .query_map([draft_id], |row| row.get::<_, i64>(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
                 conn.execute(
                     "UPDATE pending_actions SET state='cancelled',finished_at=?2
                      WHERE message_id=?1 AND kind='send' AND state='pending'",
                     rusqlite::params![draft_id, now_ms()],
                 )?;
+                // Cancelled on every device that hears of it.
+                let mut stopped = (!sends.is_empty()).then_some(CancelledSend::Cancelled);
+                let mut shared = false;
+                for action in sends {
+                    let may_go_out = device_sync::stop_shared_send(conn, action, &group, now_ms())?;
+                    shared |= may_go_out.is_some();
+                    if may_go_out == Some(true) {
+                        stopped = Some(CancelledSend::MayStillGoOut);
+                    }
+                }
 
                 let mut nudge_account = None;
                 let mut staged_paths = Vec::new();
@@ -7332,7 +7640,7 @@ impl Core {
                 if let Some(tid) = row.1 {
                     repo::threads::recompute(conn, tid)?;
                 }
-                Ok((row.1, nudge_account, staged_paths))
+                Ok((row.1, nudge_account, staged_paths, stopped, shared))
             })
             .await?;
         for path in staged_paths {
@@ -7346,7 +7654,14 @@ impl Core {
         if let Some(account_id) = nudge_account {
             self.nudge(Some(account_id), || SyncCmd::RunActions).await;
         }
-        Ok(())
+        if shared {
+            self.device_sync_now();
+        }
+        Ok(match (held, stopped) {
+            (_, Some(stopped)) => stopped,
+            (Some(_), None) => CancelledSend::Cancelled,
+            (None, None) => CancelledSend::NotScheduled,
+        })
     }
 
     pub async fn queue_send(&self, args: QueueSendArgs) -> Result<QueueSendResult> {
@@ -7513,19 +7828,23 @@ impl Core {
                     dispatch_at
                 };
                 // One send per draft: queueing it again moves the waiting
-                // send to the new time instead of sending it twice.
-                let queued: Option<(i64, String)> = conn
+                // send to the new time instead of sending it twice. One the
+                // mail server took is still on its way.
+                let queued: Option<(i64, String, bool)> = conn
                     .query_row(
-                        "SELECT id, state FROM pending_actions
-                         WHERE message_id = ?1 AND kind = 'send'
-                           AND state IN ('pending', 'inflight', 'failed')
-                         ORDER BY id DESC LIMIT 1",
+                        &format!(
+                            "SELECT id, state, {} FROM pending_actions
+                             WHERE message_id = ?1 AND kind = 'send'
+                               AND state IN ('pending', 'inflight', 'failed')
+                             ORDER BY id DESC LIMIT 1",
+                            repo::actions::SEND_TAKEN
+                        ),
                         rusqlite::params![draft_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
-                if let Some((action_id, state)) = queued {
-                    if state == "inflight" {
+                if let Some((action_id, state, taken)) = queued {
+                    if state == "inflight" || taken {
                         return Err(CoreError::Other("this message is being sent".into()));
                     }
                     // Shared with the other devices before, it is this
@@ -7762,8 +8081,8 @@ impl Core {
 
         let mut safe_name = safe_filename(
             &filename
-                .map(|name| crate::mime::decode_encoded_words(&name))
                 .or(parsed_name)
+                .map(|name| crate::mime::shown_attachment_name(&name))
                 .unwrap_or_else(|| format!("attachment-{attachment_id}")),
         );
         // Invites and other body parts often carry no filename; give the temp
@@ -7799,15 +8118,6 @@ impl Core {
             tracing::debug!(%error,"attachment text indexing deferred");
         }
         Ok(path_str)
-    }
-
-    /// Extract an attachment and write it to a caller-chosen destination (the
-    /// "download" / save-as path). Reuses `get_attachment` so extraction and
-    /// filename handling stay in one place.
-    pub async fn save_attachment(&self, attachment_id: i64, dest: String) -> Result<()> {
-        let src = self.get_attachment(attachment_id).await?;
-        tokio::fs::copy(&src, &dest).await?;
-        Ok(())
     }
 
     /// Compose "To" autocomplete. `account_id` Some scopes suggestions to the
@@ -7961,6 +8271,120 @@ impl Core {
             .await?;
         self.nudge_card(None).await;
         Ok(saved)
+    }
+
+    /// What importing a vCard file would do: how many of its contacts are
+    /// new, already saved, or unreadable, or why it can't be imported.
+    pub async fn preview_contact_import(&self, file: Vec<u8>) -> Result<ContactImportPreview> {
+        let imported = match read_contact_file(file).await? {
+            Ok(imported) => imported,
+            Err(problem) => {
+                return Ok(ContactImportPreview {
+                    problem: Some(problem),
+                    ..Default::default()
+                });
+            }
+        };
+        self.db
+            .read(move |conn| {
+                let mut preview = ContactImportPreview {
+                    unreadable: imported.unreadable,
+                    ..Default::default()
+                };
+                let mut earlier = carddav::import::EarlierCards::default();
+                for card in &imported.cards {
+                    // A card repeating an earlier one of the file finds it
+                    // saved by the time the import reaches it.
+                    let repeated = earlier.repeats(card);
+                    if repeated || repo::contact_entries::duplicate_of(conn, card)?.is_some() {
+                        preview.duplicates += 1;
+                    } else {
+                        preview.new += 1;
+                    }
+                }
+                Ok(preview)
+            })
+            .await
+    }
+
+    /// Save the contacts of a vCard file. New contacts go to the address
+    /// book of `account_id` where it has one that takes them, and are saved
+    /// on this device otherwise. `duplicates` says what happens to contacts
+    /// already saved.
+    pub async fn import_contacts(
+        &self,
+        file: Vec<u8>,
+        account_id: Option<i64>,
+        duplicates: ImportedDuplicates,
+    ) -> Result<ContactImportOutcome> {
+        let imported = read_contact_file(file)
+            .await?
+            .map_err(|problem| CoreError::Other(format!("{problem:?}")))?;
+        let outcome = self
+            .db
+            .write(move |conn| {
+                let mut tx = conn.transaction()?;
+                let mut outcome = ContactImportOutcome {
+                    unreadable: imported.unreadable,
+                    ..Default::default()
+                };
+                let add = |tx: &rusqlite::Connection, card: &carddav::vcard::Card| -> Result<()> {
+                    let id = repo::contact_entries::store(tx, None, card)?;
+                    if let Some(account_id) = account_id {
+                        repo::carddav::attach_new_contact(tx, account_id, id)?;
+                    }
+                    Ok(())
+                };
+                for card in &imported.cards {
+                    let Some(saved_id) = repo::contact_entries::duplicate_of(&tx, card)? else {
+                        add(&tx, card)?;
+                        outcome.added += 1;
+                        continue;
+                    };
+                    match duplicates {
+                        ImportedDuplicates::Skip => outcome.skipped += 1,
+                        ImportedDuplicates::Add => {
+                            // An address book names each card by its UID.
+                            let copy = carddav::import::with_new_uid(card).ok_or_else(|| {
+                                CoreError::Other("contact could not be copied".into())
+                            })?;
+                            add(&tx, &copy)?;
+                            outcome.added += 1;
+                        }
+                        ImportedDuplicates::Merge => {
+                            let merged =
+                                repo::contacts::get_record(&tx, saved_id)?.and_then(|saved| {
+                                    repo::contact_entries::merged(&saved, card.record())
+                                });
+                            let Some(merged) = merged else {
+                                outcome.skipped += 1;
+                                continue;
+                            };
+                            // A read-only or conflicting contact stays as it is.
+                            let savepoint = tx.savepoint()?;
+                            if repo::contact_entries::save(&savepoint, &merged).is_ok() {
+                                savepoint.commit()?;
+                                outcome.merged += 1;
+                            } else {
+                                outcome.skipped += 1;
+                            }
+                        }
+                    }
+                }
+                tx.commit()?;
+                Ok(outcome)
+            })
+            .await?;
+        self.bus.emit(CoreEvent::ContactsUpdated { account_id: 0 });
+        self.nudge_card(None).await;
+        Ok(outcome)
+    }
+
+    /// Every saved contact as one vCard file, and how many it holds.
+    pub async fn export_contacts(&self) -> Result<(String, usize)> {
+        self.db
+            .read(|conn| repo::contact_entries::export(conn))
+            .await
     }
 
     /// Delete a saved contact as of `revision`, or forget a suggestion.
@@ -11056,8 +11480,10 @@ impl Core {
                     now_ms,
                 )?;
                 repo::settings::set(&tx, &settings)?;
+                // App keys saved here go to this user's other devices.
+                let app_keys = device_sync::note_app_keys_saved(&tx, &previous, &settings)?;
                 tx.commit()?;
-                Ok(device_sync::synced_settings_changed(&previous, &settings))
+                Ok(device_sync::synced_settings_changed(&previous, &settings) || app_keys)
             })
             .await?;
         // Keep the resolver in the same order as persisted writes.
@@ -11065,7 +11491,47 @@ impl Core {
         if synced {
             self.device_sync_now();
         }
+        // Downloads that waited for an unmetered connection go on (#253).
+        if self
+            .metered
+            .set_pause(oauth_settings.pause_downloads_when_metered)
+        {
+            self.downloads_may_go_on().await;
+        }
         Ok(())
+    }
+
+    /// Tell how this device finds out whether its connection is metered,
+    /// such as a phone's mobile data (#253). Downloading ahead of time
+    /// waits on one when the device chose so.
+    pub async fn set_metered_probe(&self, probe: net::metered::Probe) {
+        self.metered.set_probe(probe);
+        self.downloads_may_go_on().await;
+    }
+
+    /// The platform says the connection changed between metered and not:
+    /// downloads that waited go on at once (#253).
+    pub async fn metered_changed(&self) {
+        self.downloads_may_go_on().await;
+    }
+
+    /// Whether downloading ahead of time waits now, on a metered connection.
+    pub fn downloads_wait(&self) -> bool {
+        self.metered.downloads_wait()
+    }
+
+    /// Whether this device's connection is metered, as its system tells.
+    pub fn connection_metered(&self) -> bool {
+        self.metered.is_metered()
+    }
+
+    /// Wakes the workers that download ahead of time, so ones that waited
+    /// for an unmetered connection look again.
+    async fn downloads_may_go_on(&self) {
+        self.prefetch.notify_one();
+        for handle in self.handles.read().await.values() {
+            handle.send(SyncCmd::SyncNow { complete: None });
+        }
     }
 
     /// Create or update a local mail profile without touching provider state.
@@ -11492,9 +11958,12 @@ impl Core {
         if let Some(id) = &microsoft {
             oauth::providers::validate_custom_client_id(Provider::Microsoft, id)?;
         }
-        self.db
+        let (settings, app_keys) = self
+            .db
             .write(move |conn| {
-                let mut settings = repo::settings::get(conn)?;
+                let tx = conn.transaction()?;
+                let previous = repo::settings::get(&tx)?;
+                let mut settings = previous.clone();
                 if let Some((id, secret)) = google {
                     settings.google_client_id = id.trim().to_owned();
                     settings.google_client_secret = if settings.google_client_id.is_empty() {
@@ -11508,11 +11977,18 @@ impl Core {
                     // Public desktop clients use PKCE, without a secret.
                     settings.ms_client_secret.clear();
                 }
-                repo::settings::set(conn, &settings)?;
+                repo::settings::set(&tx, &settings)?;
+                // App keys saved here go to this user's other devices.
+                let app_keys = device_sync::note_app_keys_saved(&tx, &previous, &settings)?;
+                tx.commit()?;
                 apply_oauth_settings(&settings);
-                Ok(settings)
+                Ok((settings, app_keys))
             })
-            .await
+            .await?;
+        if app_keys {
+            self.device_sync_now();
+        }
+        Ok(settings)
     }
 
     pub async fn set_sync_interval_minutes(&self, minutes: i64) -> Result<()> {
@@ -11983,9 +12459,9 @@ fn name_draft(conn: &rusqlite::Connection, draft_id: i64) -> Result<(String, boo
         .map_or("localhost", |(_, domain)| domain)
         .to_owned();
     let unnamed = conn.execute(
-        "UPDATE messages SET message_id = printf('%d.%s@%s', ?2, lower(hex(randomblob(8))), ?3)
+        "UPDATE messages SET message_id = printf('%s@%s', lower(hex(randomblob(16))), ?2)
          WHERE id = ?1 AND (message_id IS NULL OR trim(message_id) = '')",
-        rusqlite::params![draft_id, now_ms().saturating_mul(1000), domain],
+        rusqlite::params![draft_id, domain],
     )? > 0;
     let message_id: String = conn.query_row(
         "SELECT trim(message_id, '<> ') FROM messages WHERE id = ?1",
@@ -12050,20 +12526,25 @@ fn schedule_shared_send(
         "scheduled": true,
         "sendAt": send_at,
     });
-    let queued: Option<(i64, String)> = conn
+    // One the mail server took is still on its way.
+    let queued: Option<(i64, String, bool)> = conn
         .query_row(
-            "SELECT id, state FROM pending_actions
-             WHERE message_id = ?1 AND kind = 'send' AND state IN ('pending', 'inflight', 'failed')
-             ORDER BY id DESC LIMIT 1",
+            &format!(
+                "SELECT id, state, {} FROM pending_actions
+                 WHERE message_id = ?1 AND kind = 'send'
+                   AND state IN ('pending', 'inflight', 'failed')
+                 ORDER BY id DESC LIMIT 1",
+                repo::actions::SEND_TAKEN
+            ),
             rusqlite::params![draft_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     let action_id = match queued {
-        Some((_, state)) if state == "inflight" => {
+        Some((_, state, taken)) if state == "inflight" || taken => {
             return Err(CoreError::Other("this message is being sent".into()));
         }
-        Some((action_id, _)) => {
+        Some((action_id, _, _)) => {
             conn.execute(
                 "UPDATE pending_actions SET state = 'pending', not_before = ?2, payload = ?3,
                         attempts = 0, last_error = NULL, finished_at = NULL
@@ -13223,8 +13704,87 @@ mod held_send_tests {
 
         // It can: the server cancels it.
         worker(&core, 1, true).await;
-        assert!(core.cancel_scheduled_send(draft).await.unwrap());
+        assert_eq!(
+            core.cancel_scheduled_send(draft).await.unwrap(),
+            CancelledSend::Cancelled
+        );
         assert!(core.scheduled_sends().await.unwrap().is_empty());
+    }
+
+    /// A draft scheduled to go out from any of the user's devices: its send
+    /// held here, and its shared record.
+    async fn shared(core: &Core) -> (i64, i64, String) {
+        core.db
+            .write(|conn| {
+                crate::db::testutil::seed_account(conn);
+                conn.execute(
+                    "INSERT INTO messages (id, account_id, folder_id, message_id, subject,
+                                           from_addr, date, is_read, is_draft)
+                     VALUES (71, 1, 1, 'later@test.dev', 'Later', 'me@test.dev', 1, 1, 1)",
+                    [],
+                )?;
+                let send_at = now_ms() + 3_600_000;
+                let action = repo::actions::enqueue(
+                    conn,
+                    1,
+                    "send",
+                    Some(71),
+                    None,
+                    &serde_json::json!({"draftId": 71, "scheduled": true, "sendAt": send_at}),
+                    Some(repo::actions::HELD),
+                )?;
+                let sync_id = repo::synced_sends::create(
+                    conn,
+                    1,
+                    "later@test.dev",
+                    send_at,
+                    "aa",
+                    action,
+                    now_ms(),
+                )?;
+                Ok((71, action, sync_id))
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stopping_a_send_the_other_devices_cant_hear_of_says_it_may_still_go_out() {
+        // Without Flectar Mail Sync, the cancel reaches no other device.
+        for delete in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let core = Core::start(Paths::for_tests(tmp.path())).await.unwrap();
+            let (draft, action, sync_id) = shared(&core).await;
+            let stopped = if delete {
+                core.delete_draft(draft).await.unwrap()
+            } else {
+                core.cancel_scheduled_send(draft).await.unwrap()
+            };
+            assert_eq!(stopped, CancelledSend::MayStillGoOut);
+            assert!(core.scheduled_sends().await.unwrap().is_empty());
+            // Cancelled for the others, and still linked here, so the end
+            // another device reports reaches this device.
+            let send = core
+                .db
+                .read(move |conn| repo::synced_sends::get(conn, &sync_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (send.state.as_str(), send.action_id),
+                (repo::synced_sends::CANCELLED, Some(action))
+            );
+        }
+
+        // Nothing waits for a second try.
+        let tmp = tempfile::tempdir().unwrap();
+        let core = Core::start(Paths::for_tests(tmp.path())).await.unwrap();
+        let (draft, _, _) = shared(&core).await;
+        core.cancel_scheduled_send(draft).await.unwrap();
+        assert_eq!(
+            core.cancel_scheduled_send(draft).await.unwrap(),
+            CancelledSend::NotScheduled
+        );
     }
 }
 
@@ -14908,6 +15468,61 @@ mod draft_action_race_tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn a_send_the_server_took_is_neither_taken_back_nor_sent_again() {
+        // The mail server took it, and filing it waits to be tried again.
+        let (core, _temp, draft_id, action_id) = jmap_draft_with_send("pending").await;
+        core.db
+            .write(move |conn| {
+                let account = repo::accounts::get_config(conn, 1)?.unwrap();
+                repo::sender_identities::ensure_primary(conn, &account)?;
+                conn.execute(
+                    "UPDATE pending_actions
+                     SET payload = json_set(payload, '$.jmapSubmissionAccepted', json('true'))
+                     WHERE id = ?1",
+                    [action_id],
+                )?;
+                repo::actions::bump_attempt(
+                    conn,
+                    action_id,
+                    now_ms() + 60_000,
+                    "JMAP request failed",
+                )
+            })
+            .await
+            .unwrap();
+
+        core.wait_for_send(action_id).await.unwrap();
+        assert!(!core.cancel_send(action_id).await.unwrap());
+        assert_eq!(
+            core.cancel_scheduled_send(draft_id).await.unwrap(),
+            CancelledSend::NotScheduled
+        );
+        let error = core.delete_draft(draft_id).await.unwrap_err();
+        assert!(error.to_string().contains("currently being submitted"));
+        let error = core
+            .queue_send(QueueSendArgs {
+                draft_id,
+                send_at: None,
+                remind_at: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("being sent"), "{error}");
+
+        // It still goes on to be filed, as sent.
+        core.db
+            .read(move |conn| {
+                let action = repo::actions::get(conn, action_id)?.unwrap();
+                assert_eq!(action.state, "pending");
+                assert_eq!(action.payload["jmapSubmissionAccepted"], true);
+                assert!(repo::messages::get_row(conn, draft_id)?.is_some());
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -15000,6 +15615,43 @@ mod send_confirmation_tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn a_send_the_server_took_counts_as_sent_while_it_is_filed() {
+        let (core, _temp, action_id) = send_action().await;
+        // The JMAP server accepted the submission; filing the message in
+        // Sent failed, and waits to be tried again.
+        core.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE pending_actions
+                     SET payload = json_set(payload, '$.jmapSubmissionAccepted', json('true'))
+                     WHERE id = ?1",
+                    [action_id],
+                )?;
+                repo::actions::bump_attempt(
+                    conn,
+                    action_id,
+                    now_ms() + 60_000,
+                    "JMAP request failed: connection reset",
+                )
+            })
+            .await
+            .unwrap();
+
+        core.wait_for_send(action_id).await.unwrap();
+        assert!(!core.cancel_send(action_id).await.unwrap());
+        core.db
+            .read(move |conn| {
+                assert_eq!(
+                    repo::actions::get(conn, action_id)?.map(|action| action.state),
+                    Some("pending".into())
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -15011,7 +15663,7 @@ mod read_receipt_answer_tests {
         let (_, message_id) = db::testutil::seed_message(conn, "ana@example.com", "Plan", false);
         conn.execute(
             "UPDATE messages SET receipt_to = ?2, receipt_confirm = ?3,
-                 sender_verification = 'domain'
+                 sender_verification = 'domain', to_json = '[{\"email\":\"me@test.dev\"}]'
              WHERE id = ?1",
             rusqlite::params![
                 message_id,
@@ -15171,6 +15823,62 @@ mod read_receipt_answer_tests {
 
     /// An account that only receives mail can't send a receipt, so nothing
     /// asks for one, and an answer sends nothing (#252).
+    #[tokio::test]
+    async fn a_bcc_copy_asks_and_trash_or_a_blocked_sender_asks_nothing() {
+        let (_temp, core) = core_with_identity().await;
+        async fn request(core: &Core, message_id: i64) -> Option<crate::models::ReceiptRequest> {
+            core.db
+                .read(move |conn| repo::messages::detail(conn, message_id))
+                .await
+                .unwrap()
+                .receipt_request
+        }
+        // Not in To or Cc: the sender would learn the user got a copy.
+        let bcc = core
+            .db
+            .write(|conn| {
+                let id = seed_request(conn, "ana@example.com", false);
+                conn.execute(
+                    "UPDATE messages SET to_json = '[{\"email\":\"team@example.com\"}]'
+                     WHERE id = ?1",
+                    [id],
+                )?;
+                Ok(id)
+            })
+            .await
+            .unwrap();
+        assert!(request(&core, bcc).await.unwrap().needs_confirmation);
+
+        let trashed = core
+            .db
+            .write(|conn| {
+                let id = seed_request(conn, "ana@example.com", false);
+                conn.execute(
+                    "INSERT INTO folders (id, account_id, path, role) VALUES (9, 1, 'Trash', 'trash')",
+                    [],
+                )?;
+                conn.execute("UPDATE messages SET folder_id = 9 WHERE id = ?1", [id])?;
+                Ok(id)
+            })
+            .await
+            .unwrap();
+        assert!(request(&core, trashed).await.is_none());
+
+        let blocked = core
+            .db
+            .write(|conn| {
+                let id = seed_request(conn, "ana@example.com", false);
+                conn.execute(
+                    "INSERT INTO blocked_senders (address, blocked_at) VALUES ('ana@example.com', 1)",
+                    [],
+                )?;
+                Ok(id)
+            })
+            .await
+            .unwrap();
+        assert!(request(&core, blocked).await.is_none());
+    }
+
     #[tokio::test]
     async fn an_account_that_only_receives_is_asked_for_no_receipt() {
         let (_temp, core) = core_with_identity().await;
@@ -16274,6 +16982,13 @@ mod unsubscribe_offer_tests {
             .db
             .write(move |conn| {
                 db::testutil::seed_account(conn);
+                // Its server stamps the mail it receives with its own
+                // Authentication-Results.
+                conn.execute(
+                    "INSERT INTO account_authentication (account_id, messages, stamped)
+                     VALUES (1, 40, 40)",
+                    [],
+                )?;
                 let (_, message_id) =
                     db::testutil::seed_message(conn, "news@news.example", "Weekly", true);
                 conn.execute(
@@ -16313,6 +17028,27 @@ mod unsubscribe_offer_tests {
         assert_eq!(core.unsubscribe_offer(message_id).await.unwrap(), mailto);
         let (core, _temp, message_id) = list_message(None).await;
         assert_eq!(core.unsubscribe_offer(message_id).await.unwrap(), mailto);
+    }
+
+    #[tokio::test]
+    async fn one_click_needs_a_server_that_stamps_its_mail() {
+        let (core, _temp, message_id) = list_message(Some(format!("{SIGNED}{LIST_FIELDS}"))).await;
+        // Most of its mail came without the server's own results, so the
+        // signature check's field may be the sender's.
+        core.db
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE account_authentication SET stamped = 10 WHERE account_id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(!matches!(
+            core.unsubscribe_offer(message_id).await.unwrap(),
+            Some(UnsubscribeOffer::OneClick { .. })
+        ));
     }
 
     #[tokio::test]
@@ -16470,6 +17206,154 @@ mod server_timeout_tests {
             .await
             .unwrap();
         assert!(core.set_account_server_timeout(1, 60).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod hidden_folder_tests {
+    use super::*;
+
+    /// A folder hidden leaves the sidebar's folders with the folders in it,
+    /// and shows again when chosen so. The Inbox and folders with a role
+    /// always show, and Gmail keeps its labels (#253).
+    #[tokio::test]
+    async fn an_account_hides_and_shows_its_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        let (sent, notes, ideas) = core
+            .db
+            .write(|conn| {
+                db::testutil::seed_account(conn);
+                let folder = |path: &str, role: Option<&str>| {
+                    repo::folders::upsert(conn, 1, path, Some("/"), role)
+                };
+                Ok((
+                    folder("Sent", Some(roles::SENT))?,
+                    folder("Notes", None)?,
+                    folder("Notes/Ideas", None)?,
+                ))
+            })
+            .await
+            .unwrap();
+        let shown = || async {
+            core.list_shown_folders(Some(1))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|folder| folder.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown().await, [1, sent, notes, ideas]);
+
+        core.set_folder_hidden(notes, true).await.unwrap();
+        assert_eq!(shown().await, [1, sent]);
+        // Every folder still is, for rules and the like.
+        assert_eq!(core.list_folders(Some(1)).await.unwrap().len(), 4);
+        let listed = core.account_folders(1).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|folder| (
+                    folder.names.join(" / "),
+                    folder.always_shown,
+                    folder.hidden,
+                    folder.inside_hidden
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("INBOX".to_owned(), true, false, false),
+                ("Notes".to_owned(), false, true, false),
+                ("Notes / Ideas".to_owned(), false, false, true),
+                ("Sent".to_owned(), true, false, false),
+            ]
+        );
+        for always in [1, sent] {
+            assert!(core.set_folder_hidden(always, true).await.is_err());
+        }
+
+        core.set_folder_hidden(notes, false).await.unwrap();
+        assert_eq!(shown().await, [1, sent, notes, ideas]);
+
+        core.db
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE accounts SET mail_protocol = 'gmail', provider = 'gmail' WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(core.set_folder_hidden(notes, true).await.is_err());
+        assert!(core.account_folders(1).await.is_err());
+    }
+
+    /// An IMAP account leaves folders out of its sync, but for the Inbox,
+    /// Sent and Drafts, and others sync all their folders together (#253).
+    #[tokio::test]
+    async fn an_imap_account_chooses_the_folders_it_syncs() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        let (sent, lists) = core
+            .db
+            .write(|conn| {
+                db::testutil::seed_account(conn);
+                Ok((
+                    repo::folders::upsert(conn, 1, "Sent", Some("/"), Some(roles::SENT))?,
+                    repo::folders::upsert(conn, 1, "Lists", Some("/"), None)?,
+                ))
+            })
+            .await
+            .unwrap();
+        let sync = || async {
+            core.account_folders(1)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|folder| {
+                    (
+                        folder.id,
+                        folder.synced,
+                        folder.always_synced,
+                        folder.syncable,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        core.set_folder_synced(lists, false).await.unwrap();
+        assert_eq!(
+            sync().await,
+            [
+                (1, true, true, true),
+                (lists, false, false, true),
+                (sent, true, true, true),
+            ]
+        );
+        for always in [1, sent] {
+            assert!(core.set_folder_synced(always, false).await.is_err());
+        }
+        // Opening it checks it, and doesn't change what syncs.
+        core.check_folder(lists).await.unwrap();
+        core.set_folder_synced(lists, true).await.unwrap();
+        assert!(sync().await.iter().all(|(_, synced, ..)| *synced));
+
+        core.db
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE accounts SET mail_protocol = 'jmap' WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(core.set_folder_synced(lists, false).await.is_err());
+        assert!(!sync().await.iter().any(|(_, _, _, syncable)| *syncable));
     }
 }
 
@@ -16781,7 +17665,15 @@ mod invitation_tests {
         let from = from.to_string();
         let id = core
             .db
-            .write(move |conn| Ok(db::testutil::seed_message(conn, &from, "Invitation", false).1))
+            .write(move |conn| {
+                let id = db::testutil::seed_message(conn, &from, "Invitation", false).1;
+                // From the person it says, as the receiving server confirmed.
+                conn.execute(
+                    "UPDATE messages SET sender_verification = 'domain' WHERE id = ?1",
+                    [id],
+                )?;
+                Ok(id)
+            })
             .await
             .unwrap();
         sync::ingest::store_calendar_events(
@@ -17332,11 +18224,17 @@ mod invitation_tests {
         let moved = calendar
             .replace("SEQUENCE:0", "SEQUENCE:1")
             .replace("20261120T090000Z", "20261122T090000Z");
-        let update = arriving(&core, "bob@example.com", &moved, false).await;
+        let update = arriving(&core, "bob@example.com", &moved, true).await;
         assert_eq!(
             card(&core, update).await.starts_at,
             calendar::parse_dt("20261122T090000Z").unwrap().0
         );
+        // One the receiving server didn't confirm as the organizer's, which
+        // anyone could forge, leaves the calendar as it was.
+        let forged = calendar
+            .replace("SEQUENCE:0", "SEQUENCE:2")
+            .replace("20261120T090000Z", "20261123T090000Z");
+        arriving(&core, "bob@example.com", &forged, false).await;
         assert!(!card(&core, update).await.out_of_date);
     }
 
@@ -17896,5 +18794,319 @@ mod answer_route_tests {
             route(Some(read_only), "TENTATIVE"),
             AnswerRoute::Mail { store: false }
         );
+    }
+}
+
+#[cfg(test)]
+mod body_read_again_tests {
+    use super::*;
+
+    const FORWARD: &str = "From: sender@example.com\r\n\
+        To: me@test.dev\r\n\
+        Subject: Inline forward\r\n\
+        MIME-Version: 1.0\r\n\
+        Content-Type: multipart/mixed; boundary=b\r\n\
+        \r\n\
+        --b\r\n\
+        Content-Type: text/plain\r\n\
+        \r\n\
+        Outer body.\r\n\
+        --b\r\n\
+        Content-Type: message/rfc822\r\n\
+        Content-Disposition: inline\r\n\
+        \r\n\
+        From: original@example.com\r\n\
+        Subject: Original message\r\n\
+        \r\n\
+        Forwarded body.\r\n\
+        --b--\r\n";
+
+    /// A message of account 1 kept before #455 with only its own text, and
+    /// marked to be read again as migration 69 marks one. `raw_path` is
+    /// where its original is kept, if anywhere.
+    async fn kept(core: &Core, raw_path: Option<String>) -> i64 {
+        core.db
+            .write(move |conn| {
+                db::testutil::seed_account(conn);
+                let (_, id) = db::testutil::seed_message(conn, "sender@example.com", "Fwd", false);
+                conn.execute(
+                    "UPDATE messages SET body_state = 'cached', raw_path = ?2,
+                         mime_plan_json = '{\"version\":3}'
+                     WHERE id = ?1",
+                    rusqlite::params![id, raw_path],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_bodies (message_id, text_body) VALUES (?1, 'Outer body.')",
+                    [id],
+                )?;
+                conn.execute(
+                    "INSERT INTO attachments (message_id, part_id, mime_type, size, is_inline)
+                     VALUES (?1, '0', 'message/rfc822', 80, 1)",
+                    [id],
+                )?;
+                conn.execute(
+                    "INSERT INTO bodies_to_read_again (message_id) VALUES (?1)",
+                    [id],
+                )?;
+                Ok(id)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn marked(core: &Core, id: i64) -> bool {
+        core.db
+            .read(move |conn| Ok(repo::messages::body_to_read_again(conn, id)?.is_some()))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_kept_body_is_read_again_from_its_original_when_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        let original = temp.path().join("kept.eml");
+        std::fs::write(&original, FORWARD).unwrap();
+        let id = kept(&core, Some(original.to_string_lossy().into_owned())).await;
+
+        let detail = core.get_body(id).await.unwrap();
+        let text = detail.text_body.unwrap();
+        assert!(
+            text.starts_with("Outer body.\n\n---------- Forwarded message"),
+            "{text}"
+        );
+        assert!(text.ends_with("Forwarded body."), "{text}");
+        assert!(detail.html_body.unwrap().contains("Forwarded body."));
+        assert_eq!(detail.body_state, "cached");
+        let [file] = detail.attachments.as_slice() else {
+            panic!("{:?}", detail.attachments);
+        };
+        assert_eq!(file.filename.as_deref(), Some("Original message.eml"));
+        assert!(!marked(&core, id).await);
+    }
+
+    #[tokio::test]
+    async fn a_kept_body_without_an_original_is_fetched_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        let id = kept(&core, None).await;
+
+        let detail = core.get_body(id).await.unwrap();
+        // The kept body shows while the server sends it again.
+        assert_eq!(detail.text_body.as_deref(), Some("Outer body."));
+        assert_ne!(detail.body_state, "cached");
+        assert!(!marked(&core, id).await);
+        let plan = core
+            .db
+            .read(move |conn| repo::messages::mime_plan(conn, id))
+            .await
+            .unwrap();
+        assert!(plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn mail_kept_only_here_keeps_its_body_when_the_original_is_gone() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        let id = kept(
+            &core,
+            Some(temp.path().join("gone.eml").to_string_lossy().into_owned()),
+        )
+        .await;
+        core.db
+            .write(|conn| {
+                conn.execute(
+                    "UPDATE accounts SET mail_protocol = 'pop3' WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let detail = core.get_body(id).await.unwrap();
+        assert_eq!(detail.text_body.as_deref(), Some("Outer body."));
+        assert_eq!(detail.body_state, "cached");
+        assert!(!marked(&core, id).await);
+    }
+}
+
+#[cfg(test)]
+mod contact_import_tests {
+    use super::*;
+
+    /// Ada, Grace, Ada again with her title, and a card with no name.
+    const FILE: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada Lovelace\r\nEMAIL:ada@example.com\r\nTEL:+44 20 1234\r\nEND:VCARD\r\n\
+        BEGIN:VCARD\r\nVERSION:2.1\r\nN:Hopper;Grace;;;\r\nEMAIL;INTERNET:grace@example.com\r\nORG:Navy\r\nEND:VCARD\r\n\
+        BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada again\r\nEMAIL:ADA@example.com\r\nTITLE:Countess\r\nEND:VCARD\r\n\
+        BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:Nothing to call them by\r\nEND:VCARD\r\n";
+
+    async fn core() -> (tempfile::TempDir, Core) {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::start_mail_ui(Paths::for_tests(temp.path()))
+            .await
+            .unwrap();
+        (temp, core)
+    }
+
+    async fn saved(core: &Core) -> Vec<ContactRecord> {
+        core.db
+            .read(|conn| {
+                let mut statement = conn.prepare("SELECT id FROM contact_entries ORDER BY id")?;
+                let ids = statement
+                    .query_map([], |row| row.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ids.into_iter()
+                    .filter_map(|id| repo::contacts::get_record(conn, id).transpose())
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .unwrap()
+    }
+
+    fn file() -> Vec<u8> {
+        FILE.as_bytes().to_vec()
+    }
+
+    #[tokio::test]
+    async fn a_file_tells_what_importing_it_adds_then_imports_it() {
+        let (_temp, core) = core().await;
+        let preview = core.preview_contact_import(file()).await.unwrap();
+        assert_eq!(
+            preview,
+            ContactImportPreview {
+                new: 2,
+                duplicates: 1,
+                unreadable: 1,
+                problem: None
+            }
+        );
+        let outcome = core
+            .import_contacts(file(), None, ImportedDuplicates::Skip)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ContactImportOutcome {
+                added: 2,
+                merged: 0,
+                skipped: 1,
+                unreadable: 1
+            }
+        );
+        let names = saved(&core)
+            .await
+            .into_iter()
+            .map(|contact| contact.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Ada Lovelace", "Grace Hopper"]);
+        // Every contact of the file is saved now.
+        let again = core.preview_contact_import(file()).await.unwrap();
+        assert_eq!((again.new, again.duplicates), (0, 3));
+    }
+
+    #[tokio::test]
+    async fn saved_contacts_take_what_is_new_or_get_a_copy() {
+        let (_temp, core) = core().await;
+        core.import_contacts(file(), None, ImportedDuplicates::Skip)
+            .await
+            .unwrap();
+        // Only Ada's second card adds something: her title.
+        let outcome = core
+            .import_contacts(file(), None, ImportedDuplicates::Merge)
+            .await
+            .unwrap();
+        assert_eq!((outcome.merged, outcome.skipped), (1, 2));
+        let contacts = saved(&core).await;
+        let ada = contacts
+            .iter()
+            .find(|contact| contact.name == "Ada Lovelace")
+            .unwrap();
+        assert_eq!(ada.job_title, "Countess");
+        assert_eq!(ada.details.emails.len(), 1, "the same address in capitals");
+        assert_eq!(ada.phone, "+44 20 1234");
+
+        let outcome = core
+            .import_contacts(file(), None, ImportedDuplicates::Add)
+            .await
+            .unwrap();
+        assert_eq!(outcome.added, 3);
+        let uids = core
+            .db
+            .read(|conn| {
+                let mut statement = conn.prepare("SELECT DISTINCT uid FROM contact_entries")?;
+                Ok(statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(uids.len(), 5, "each copy has a UID of its own");
+    }
+
+    #[tokio::test]
+    async fn new_contacts_join_the_address_book_of_the_account_chosen() {
+        let (_temp, core) = core().await;
+        core.db
+            .write(|conn| {
+                db::testutil::seed_account(conn);
+                repo::carddav::upsert_addressbook(
+                    conn,
+                    1,
+                    "https://dav.example/books/personal/",
+                    Some("Personal"),
+                    false,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        core.import_contacts(file(), Some(1), ImportedDuplicates::Skip)
+            .await
+            .unwrap();
+        let uploads = core
+            .db
+            .read(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM carddav_objects WHERE dirty = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(uploads, 2);
+    }
+
+    #[tokio::test]
+    async fn every_saved_contact_exports_as_one_file_that_imports_again() {
+        let (_temp, core) = core().await;
+        core.import_contacts(file(), None, ImportedDuplicates::Skip)
+            .await
+            .unwrap();
+        let (text, count) = core.export_contacts().await.unwrap();
+        assert_eq!(count, 2);
+        let cards = carddav::import::read(text.as_bytes()).unwrap().cards;
+        let names = cards
+            .iter()
+            .map(|card| card.record().name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["Ada Lovelace", "Grace Hopper"]);
+    }
+
+    #[tokio::test]
+    async fn a_file_too_large_is_refused_before_reading() {
+        let (_temp, core) = core().await;
+        let preview = core
+            .preview_contact_import(vec![b' '; carddav::import::MAX_FILE_BYTES + 1])
+            .await
+            .unwrap();
+        assert_eq!(preview.problem, Some(ContactFileProblem::TooLarge));
     }
 }

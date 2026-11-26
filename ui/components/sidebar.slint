@@ -2,7 +2,7 @@ import { ScrollFade } from "scroll-fade.slint";
 import { ListView, VerticalBox } from "std-widgets.slint";
 import { MailboxRole, MailProfileRow, SidebarRow, SidebarRowKind } from "../models.slint";
 import { MailboxWords } from "../mailbox-words.slint";
-import { SidebarItem, SidebarSectionHeader } from "sidebar-controls.slint";
+import { DrawerSettingsItem, SidebarItem, SidebarSectionHeader } from "sidebar-controls.slint";
 import { SidebarStyle } from "sidebar-row.slint";
 import { Button } from "button.slint";
 import { IconButton, LineEdit } from "controls.slint";
@@ -132,6 +132,7 @@ export component MailSidebar inherits CollapsibleWorkspaceSidebar {
     in property <int> account-count;
     callback select-scope(string);
     callback compose;
+    callback show-settings;
     callback manage-accounts;
     // An account heading's Account settings: Settings opens on that account.
     callback account-settings(int);
@@ -148,6 +149,7 @@ export component MailSidebar inherits CollapsibleWorkspaceSidebar {
     callback request-create-label(int, string, int, string);
     callback request-rename-folder(int, string);
     callback request-delete-folder(int, string);
+    callback request-hide-folder(int);
     callback request-empty-trash(int);
     // Mark all as read for a row: its scope and the name it shows (#234).
     callback request-mark-all-read(string, string);
@@ -731,6 +733,7 @@ export component MailSidebar inherits CollapsibleWorkspaceSidebar {
                         can-create-child: entry.mailbox.can_create_children;
                         can-rename: entry.mailbox.role == MailboxRole.none && entry.mailbox.can_rename;
                         can-delete: entry.mailbox.role == MailboxRole.none && entry.mailbox.can_delete;
+                        can-hide: entry.mailbox.can_hide;
                         can-empty-trash: entry.mailbox.role == MailboxRole.trash
                             && entry.mailbox.folder_id >= 0;
                         mail-drop-enabled: entry.mailbox.is_selectable
@@ -780,6 +783,7 @@ export component MailSidebar inherits CollapsibleWorkspaceSidebar {
                         }
                         rename-folder(folder-id, name) => { root.request-rename-folder(folder-id, name); }
                         delete-folder(folder-id, name) => { root.request-delete-folder(folder-id, name); }
+                        hide-folder(folder-id) => { root.request-hide-folder(folder-id); }
                         empty-trash(account-id) => { root.request-empty-trash(account-id); }
                     }
 
@@ -919,6 +923,16 @@ export component MailSidebar inherits CollapsibleWorkspaceSidebar {
                 title-color: root.title-color;
                 muted-color: root.muted-color;
             }
+        }
+
+        if root.touch-mode : DrawerSettingsItem {
+            background-color: root.background-color;
+            selection-background: root.selection-background;
+            accent-color: root.accent-color;
+            body-color: root.body-color;
+            muted-color: root.muted-color;
+            divider-color: root.divider-color;
+            clicked => { root.show-settings(); }
         }
     }
 }

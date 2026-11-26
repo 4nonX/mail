@@ -24,6 +24,7 @@ async fn fixture() -> (tempfile::TempDir, SyncCtx, AccountConfig) {
         tokens,
         credentials,
         pace: Default::default(),
+        metered: Default::default(),
     };
     let mut config = ctx
         .db

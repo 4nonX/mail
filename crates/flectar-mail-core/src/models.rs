@@ -610,6 +610,17 @@ pub struct AccountSettings {
     /// keeps the fields a record leaves out as a newer version's.
     #[serde(default)]
     pub folder_roles: std::collections::BTreeMap<String, String>,
+    /// The folders hidden from the sidebar and the Move to list, with the
+    /// folders in them, by their paths (#253). Their mail still syncs. Always
+    /// written, empty too, as `folder_roles` is.
+    #[serde(default)]
+    pub hidden_folders: std::collections::BTreeSet<String>,
+    /// IMAP accounts: the folders this device leaves out of its background
+    /// sync, by their paths (#253). Opening one checks it once. The Inbox,
+    /// Sent and Drafts always sync. Each device keeps its own, as it does
+    /// `mail_history`.
+    #[serde(default)]
+    pub unsynced_folders: std::collections::BTreeSet<String>,
 }
 
 const fn plain_text_replies_default() -> bool {
@@ -639,6 +650,8 @@ impl AccountSettings {
             check_interval: CheckInterval::App,
             push: push_default(),
             folder_roles: std::collections::BTreeMap::new(),
+            hidden_folders: std::collections::BTreeSet::new(),
+            unsynced_folders: std::collections::BTreeSet::new(),
             copies: AutomaticCopies::default(),
             identity_copies: std::collections::BTreeMap::new(),
         }
@@ -836,6 +849,43 @@ mod account_settings_tests {
             );
         }
         assert_eq!(DownloadPolicy::from_storage("bodies"), None);
+    }
+
+    /// Every folder starts synced, and the unsynced ones are always written
+    /// (#253).
+    #[test]
+    fn unsynced_folders_start_empty_and_are_always_written() {
+        let mut settings: AccountSettings = serde_json::from_str(MINIMAL_SETTINGS).unwrap();
+        assert!(settings.unsynced_folders.is_empty());
+        assert!(
+            serde_json::to_string(&settings)
+                .unwrap()
+                .contains(r#""unsyncedFolders":[]"#)
+        );
+        settings.unsynced_folders.insert("Archive".into());
+        let restored: AccountSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.unsynced_folders, settings.unsynced_folders);
+    }
+
+    /// No folder starts hidden, and the hidden ones are always written, so
+    /// Flectar Mail Sync carries showing the last one again (#253).
+    #[test]
+    fn hidden_folders_start_empty_and_are_always_written() {
+        let mut settings: AccountSettings = serde_json::from_str(MINIMAL_SETTINGS).unwrap();
+        assert!(settings.hidden_folders.is_empty());
+        assert!(
+            serde_json::to_string(&settings)
+                .unwrap()
+                .contains(r#""hiddenFolders":[]"#)
+        );
+        settings.hidden_folders.insert("Notes".into());
+        let restored: AccountSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            restored.hidden_folders,
+            std::collections::BTreeSet::from(["Notes".to_owned()])
+        );
     }
 
     #[test]
@@ -1450,6 +1500,52 @@ pub struct CardDavConnection {
     pub username: String,
     pub enabled: bool,
     pub last_error: Option<String>,
+}
+
+/// Why a contacts file can't be imported at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContactFileProblem {
+    /// Larger than [`crate::carddav::import::MAX_FILE_BYTES`].
+    TooLarge,
+    /// More cards than [`crate::carddav::import::MAX_CARDS`].
+    TooManyContacts,
+}
+
+/// What importing a contacts file would do, or why it can't.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContactImportPreview {
+    /// Contacts not saved yet.
+    pub new: usize,
+    /// Contacts already saved, with the same UID or an email address in
+    /// common, or repeated in the file.
+    pub duplicates: usize,
+    /// Cards with nothing to call the contact by, or that are malformed.
+    pub unreadable: usize,
+    pub problem: Option<ContactFileProblem>,
+}
+
+/// What importing does with a contact that is already saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportedDuplicates {
+    /// Keep the saved contact as it is.
+    Skip,
+    /// Add to the saved contact what it doesn't have yet: new addresses and
+    /// numbers, and fields it leaves empty.
+    Merge,
+    /// Save the imported card as another contact.
+    Add,
+}
+
+/// What importing a contacts file did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContactImportOutcome {
+    pub added: usize,
+    pub merged: usize,
+    /// Duplicates left as they were, and saved contacts that can't change,
+    /// such as those of a read-only address book.
+    pub skipped: usize,
+    pub unreadable: usize,
 }
 
 // Deliberately no `Debug`: it would print the CardDAV app password.
@@ -2471,6 +2567,19 @@ pub struct ScheduledSend {
     pub error: Option<String>,
 }
 
+/// What stopping a draft's scheduled send did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelledSend {
+    /// No send waited.
+    NotScheduled,
+    /// The send is cancelled.
+    Cancelled,
+    /// The send is cancelled here, but another of the user's devices may
+    /// still send it: it holds the send, may be sending it right now, or
+    /// can't hear of the cancel yet.
+    MayStillGoOut,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueueSendResult {
@@ -2520,6 +2629,30 @@ pub struct FolderChoice {
     /// The folder's name after its parents' names, outermost first, as
     /// "Archive" and "2026".
     pub names: Vec<String>,
+}
+
+/// One of an account's folders as Settings lists them, to choose which show
+/// (#253). Parents come before the folders in them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountFolder {
+    pub id: i64,
+    /// The folder's name after its parents' names, outermost first, as
+    /// "Archive" and "2026".
+    pub names: Vec<String>,
+    /// The Inbox and the folders with a role such as Sent always show.
+    pub always_shown: bool,
+    /// Hidden by the user.
+    pub hidden: bool,
+    /// Hidden with a folder it's in.
+    pub inside_hidden: bool,
+    /// IMAP accounts: whether this device syncs it in the background.
+    pub synced: bool,
+    /// The Inbox, Sent and Drafts always sync.
+    pub always_synced: bool,
+    /// A folder Flectar Mail syncs at all: one that holds mail, but not the
+    /// All Mail folder that repeats every other one.
+    pub syncable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3162,6 +3295,11 @@ pub struct Settings {
     /// The interface's text size.
     #[serde(default)]
     pub interface_text_size: InterfaceTextSize,
+    /// On a metered connection, such as a phone's mobile data, accounts
+    /// check for mail but download messages only when they're opened
+    /// (#253). Each device keeps its own.
+    #[serde(default)]
+    pub pause_downloads_when_metered: bool,
     /// What to do when a message asks for a read receipt.
     #[serde(default)]
     pub read_receipts: ReadReceiptPolicy,
@@ -3235,6 +3373,10 @@ pub struct Settings {
     pub compose_font: String,
     #[serde(default = "default_compose_text_size")]
     pub compose_text_size: String,
+    /// On the desktop, new messages, replies, forwards and drafts open in a
+    /// window of their own instead of over the mail (#254).
+    #[serde(default)]
+    pub compose_in_window: bool,
     /// How many days a link to a file sent by link works, or 0 for as long as the file is
     /// kept. A server that limits links shortens it.
     #[serde(default = "default_link_expiry_days")]
@@ -3658,6 +3800,7 @@ impl Default for Settings {
             message_appearance: MessageAppearance::default(),
             reduce_motion: ReduceMotion::default(),
             interface_text_size: InterfaceTextSize::default(),
+            pause_downloads_when_metered: false,
             read_receipts: ReadReceiptPolicy::default(),
             empty_trash_after_days: 0,
             empty_junk_after_days: 0,
@@ -3680,6 +3823,7 @@ impl Default for Settings {
             undo_send_seconds: 10,
             compose_font: default_compose_font(),
             compose_text_size: default_compose_text_size(),
+            compose_in_window: false,
             link_expiry_days: default_link_expiry_days(),
             link_password: false,
             load_remote_images: false,
@@ -4222,6 +4366,8 @@ mod tests {
         assert_eq!(ListDensity::parse("cozy"), None);
         assert!(s.show_tabs);
         assert!(s.conversation_view);
+        // Messages are written over the mail until Settings says otherwise.
+        assert!(!s.compose_in_window);
         // New installs draw their own frame; a saved choice stays.
         assert_eq!(s.window_frame, "integrated");
         let saved: Settings = serde_json::from_str(

@@ -6,8 +6,10 @@ A closer look at what the [README](../README.md) summarizes.
 - [Tabs](#tabs)
 - [Search](#search)
 - [Checking for mail](#checking-for-mail)
+- [Server settings for new accounts](#server-settings-for-new-accounts)
 - [Advanced account settings](#advanced-account-settings)
 - [Special folders](#special-folders)
+- [Choosing folders](#choosing-folders)
 - [Sender addresses](#sender-addresses)
 - [Automatic Cc and Bcc](#automatic-cc-and-bcc)
 - [New-mail notifications](#new-mail-notifications)
@@ -116,6 +118,17 @@ Settings → General.
   <img src="../resources/screenshots/desktop-tabs-light.png" alt="Flectar Mail with tabs for several conversations, the calendar, contacts, and files">
 </picture>
 
+## Conversation windows
+
+On the desktop, double-click a conversation, press **Shift+Enter**, or choose
+**Open in new window** from its menu to read it in a window of its own. The
+window shows everything the reader does, with the same actions, and stays on
+its conversation while you go through the rest of your mail. Opening a
+conversation that already has a window brings that window forward. Archiving,
+deleting, moving or snoozing the conversation from its window closes it, and
+so does **Esc**. Replies and forwards from the window open in a window of their
+own. A conversation window opens at the size the last one had.
+
 ## Search
 
 The search field finds mail stored on this device. Every word has to match,
@@ -174,12 +187,14 @@ server announces new mail, where it can, and otherwise every 5 minutes, or as
 often as **Check for new mail** in Settings → General says. To check now, press
 F5 for the accounts the mail view shows, or Shift+F5 or the refresh button
 beside the search field for every account. On a phone, pull the mail list down
-from its top to check the accounts it shows. An account's menu in the sidebar
-(right-click, or hold a finger on it on a phone) checks just that account.
+from its top to check the accounts it shows, or choose **Check for new mail** at
+the end of the search field's menu to check every account. An account's menu in
+the sidebar (right-click, or hold a finger on it on a phone) checks just that
+account.
 
 While a check runs for more than a moment, a small spinner turns beside the
-account's name in the sidebar; it holds still while motion is reduced. When the
-server doesn't accept an account's sign-in, or its checks keep failing for a
+account's name in the sidebar; while motion is reduced, it pulses in place. When
+the server doesn't accept an account's sign-in, or its checks keep failing for a
 minute, a red marker takes its place. Click or tap the marker to see why, with
 **Try again** to check right away, or **Sign in again** when the sign-in needs
 renewing. After a check you asked for, the marker shows at once. Flectar Mail
@@ -214,6 +229,14 @@ also downloads attachments up to 25 MB, one at a time, so they open offline
 too. Larger ones download when you open them, and each device keeps its own
 choice.
 
+On a metered connection, such as mobile data or a hotspot, downloading ahead of
+time can wait. With **Pause downloads** on in Settings → Network, accounts
+still check for new mail, and messages and attachments download when you open
+them until the connection isn't metered anymore. Each device keeps its own
+choice. Windows tells from the connection's data plan, macOS and iOS from
+cellular data, a hotspot or Low Data Mode, Android from mobile data or a
+network marked as metered, and Linux from the desktop portal or NetworkManager.
+
 A server can ask Flectar Mail to slow down, when an account has too many
 connections open or makes too many requests, or while another app is using a
 POP3 mailbox. Flectar Mail then waits before it asks that server again, for as
@@ -228,6 +251,33 @@ turns down a connection for having too many open, Flectar Mail opens one fewer
 for downloading in the background from then on. When many accounts start
 together, they take turns connecting, and a few at a time download their older
 mail.
+
+## Server settings for new accounts
+
+When you type the address of a new IMAP, POP3 or JMAP account, Flectar Mail
+looks up its servers. It asks the address's domain for its own configuration
+file, over HTTPS first and then over plain HTTP, and otherwise looks the domain
+up in the public provider database at autoconfig.thunderbird.net. When neither
+knows the domain, it asks your device's DNS which server takes the domain's
+mail, and looks up the provider of that server the same way. That step is
+skipped while a proxy is set, because DNS questions can't go through one. Only
+the domain is sent, never the whole address. Servers it finds fill in the form
+as long as you haven't changed them, and the form says where they came from.
+Settings that came over plain HTTP or through DNS could have been changed on
+the way, so **Connect account** waits until you check the server names and tick
+**I checked these servers and trust them**. Your other accounts on the same domain, and
+Gmail's servers for a Gmail address, fill in the form without a lookup.
+
+Adding a CalDAV calendar or connecting CardDAV contacts to one of these accounts
+fills in the server address the same way. The provider's configuration file
+comes first, then the domain's CalDAV or CardDAV records in DNS (RFC 6764), and
+then the domain's own `/.well-known/caldav` or `/.well-known/carddav` address
+over HTTPS. Only servers that use TLS are filled in, and the DNS step is skipped
+while a proxy is set. A DNS record that points to a server outside the
+address's domain could have been forged, so **Connect** waits until you tick
+**I checked this server and trust it**. Google and Microsoft accounts reach
+their own calendars and contacts through their sign-in, so their dialogs stay
+empty.
 
 ## Advanced account settings
 
@@ -273,16 +323,35 @@ its place, one deleted gives it back to the server's folder, and with
 **Subscribed folders only** a chosen folder is listed though you haven't
 subscribed to it. Flectar Mail Sync takes the choices to your other devices.
 
+## Choosing folders
+
+Folders an account never uses, such as one for notes or an old archive, can
+leave the sidebar. **Hide folder** in a folder's menu in the sidebar hides it,
+with the folders in it, and **Folders** in the account's card in Settings →
+Accounts lists every folder with a switch to show or hide it. A hidden folder
+also leaves the **Move to** list, and its mail still downloads and turns up in
+searches. The Inbox and the folders for sent mail, drafts and the like always
+show. A hidden folder renamed in Flectar Mail stays hidden, and Flectar Mail
+Sync hides it on your other devices too. This works for IMAP, JMAP and POP3
+accounts. Gmail keeps its labels.
+
+An IMAP account can also leave folders out of what this device syncs, such as a
+large archive. Turn off a folder's **Sync** switch in **Folders**, and its mail
+stops downloading in the background, while the mail already here stays. Opening
+the folder checks it then. The Inbox, Sent and Drafts always sync, and each
+device keeps its own choice.
+
 ## Sender addresses
 
 An account can send from more addresses than the one it signs in with. Gmail's
 send-as addresses and a JMAP server's identities come from the provider, and for
 other servers you add the aliases they let you send from in the account's
 **Signatures** tab in Settings → Accounts, which also chooses the one new
-messages start from. An account keeps up to 1,000. Past ten, the composer's
-**From** and **Default sender identity** open a picker that finds an address by
-its name or address as you type, and Settings lists 50 at a time with a search
-for the others.
+messages start from. In the composer, the **From** menu lists your accounts and
+then the chosen account's addresses. An account keeps up to 1,000. Past ten, the
+menu's **Choose another address…** and Settings' **Default sender identity** open
+a picker that finds an address by its name or address as you type, and Settings
+lists 50 at a time with a search for the others.
 
 ## Automatic Cc and Bcc
 
@@ -391,7 +460,8 @@ three-pane layout, switch to a streamlined minimal view, choose a light or dark
 theme, select a built-in color palette or create a custom one, and show or hide
 sender avatars. You can also give the app icon a different color: on the
 taskbar or Dock, in the system tray, in the Linux app launcher, and on Android
-and iOS home screens.
+and iOS home screens. On Windows, Flectar Mail's Start menu shortcut, taskbar
+pins and desktop shortcuts change color with it.
 
 The full workspace keeps your folders, message list, and selected email visible
 together. The minimal layout reduces visual noise and gives each part of your
@@ -402,6 +472,11 @@ It uses your selected color palette for HTML, plain text, and Reader mode.
 To temporarily show the sender's original colors, use the contrast icon between
 Find and Reader mode in the desktop message toolbar, or choose **Show original
 colors** from the message's three-dot menu on any screen size.
+
+A message's subject can be selected and copied like its text, and right-clicking
+it offers **Copy** for the whole subject. Right-click the sender for **Copy email
+address** or **Copy name and email address**, and click the sender to see whom
+the message went to, where every address can be selected and copied too.
 
 Turn on **Reduce motion** in Settings → General → Interface, or leave it on
 System to follow Animation effects on Windows, Reduce motion on macOS and iOS,
@@ -428,6 +503,14 @@ keeps the native traffic lights, Windows keeps Snap Layouts and the system menu,
 and Linux follows the button order and title-bar actions configured for GNOME or
 KDE.
 
+The window opens at the size it had when you last closed it, and maximized
+again if it was. Windows and macOS also put it back where it was, as long as
+that is still on a screen, while on Linux the window manager places it. A
+message moved into a window of its own opens at the size the last one had. With
+**Write in a new window** on in Settings → General → Writing, new messages,
+replies, forwards and drafts open in a window of their own, so your mail stays
+in view while you write.
+
 ## Calendar, contacts, and files
 
 Mail, calendars, and contacts sit side by side, synced over Google, Microsoft,
@@ -438,6 +521,14 @@ images and text. [Contacts and CardDAV](carddav-contacts.md) describes how
 contacts are stored and synced. To sync an account's contacts with a CardDAV
 server, open its card in Settings → Accounts and choose **Connect** under
 Contacts.
+
+To bring contacts from another address book, a phone or Google Contacts,
+export them there as a vCard file and choose **Import contacts…** in the menu
+next to the contacts search. Flectar Mail reads vCard 2.1, 3.0 and 4.0 files,
+tells how many contacts are new and how many you already have, and lets you
+leave the ones you have as they are, add what's new to them, or import them
+again as copies. With an account's contacts open, new contacts go to its
+address book. **Export contacts…** saves every contact to one vCard file.
 
 ## Signatures and OpenPGP
 
@@ -567,6 +658,12 @@ sends each of its messages. They join the new message once they're fetched,
 from this device or from the server, and a copy of mail sent from here leaves
 out who it was blind copied to. A forward waits for its files, these and the
 original's attachments, before it can be sent.
+
+A message that carries another message inside it, as some mail apps forward
+one and as a bounce returns one, shows that message below its own text, under
+the sender, date, subject and recipients it had. One sent as an attachment
+stays a file. Either way it's listed with the files as an `.eml` file named
+after its subject, and so are the files it carries.
 
 **Email templates** keep a subject and message to start from, which the
 composer's template list inserts at the cursor. **Insert placeholder** in a
@@ -952,8 +1049,10 @@ read messages and conversations as plain text, search contacts and list
 calendar events, and nothing more unless you allow it. You choose which
 accounts they can read, mail imported to this device among them, and for each
 account which folders. Spam and Trash stay out until you add them, since junk
-mail is where hostile instructions are most likely to hide. Encrypted messages
-are withheld, and passwords, sign-in tokens and keys never reach an agent.
+mail is where hostile instructions are most likely to hide. A message stays
+out when any folder or label it's in is hidden from agents, even if it's also
+in one they can read, such as Gmail's All Mail. Encrypted messages are
+withheld, and passwords, sign-in tokens and keys never reach an agent.
 
 With Write drafts on, agents can also save plain-text drafts, new messages or
 replies, in Drafts for you to check and send yourself. An agent can change its
@@ -961,8 +1060,10 @@ own draft until you edit it, and never anyone else's.
 
 Three more switches let agents mark messages read or flagged, move them to the
 archive, to Trash or to another folder, and add or take off your labels. They
-can change messages only in folders they can read, and never delete anything
-for good. Together they can change 100 messages a minute.
+can change messages only in folders they can read, move them only between an
+account's own folders, never into or out of one other people may share, and
+never delete anything for good. Together they can change 100 messages a
+minute.
 
 With Ask to send on, an agent can ask to send a draft. It opens in a window of
 its own, with a note naming the agent, and it's sent only if you send it. One
@@ -980,21 +1081,35 @@ is immune to instructions hidden in mail, so give agents only what they need.
 
 ## Flectar Mail Sync
 
-Flectar Mail Sync keeps your accounts and their sign-ins, preferences,
-signatures, profiles, templates, blocked senders, snoozes, reply reminders
-and scheduled messages the same on all your devices. Everything is end-to-end
+Flectar Mail Sync keeps your accounts, preferences, signatures, profiles,
+templates, blocked senders, snoozes, reply reminders and scheduled messages
+the same on all your devices. Everything is end-to-end
 encrypted before it leaves a device, so not even Flectar Mail can read it, and
 there is no account to create: a 24-word recovery code brings sync back on a
 new device. Your mail, contacts and calendars keep syncing with your mail
 provider as before.
 
 Turn it on in Settings → Sync. To add a device, choose **Add a device** on one
-that already syncs and type the code it shows into **Enter code** on the new
-one, either on the welcome screen or in Settings → Sync. A device can also join
-with your recovery code. Each device keeps its own mail checking, how much mail
-history it downloads and what it downloads ahead of time, its proxy and server
-timeout, and settings that belong to the device itself, such as reduced motion
-and text size.
+that already syncs. It shows a QR code for a phone to scan with **Scan QR
+code**, on the welcome screen or in Settings → Sync, and **Use a code** shows a
+code to type into **Enter code** instead. The other way around, a computer shows
+its own QR code with **Show QR code**, and a phone that syncs scans it from
+**Add a device**. Android phones scan with Google Play services and HarmonyOS
+phones with the system's scanner, neither of which needs the app to have camera
+access. An iPhone asks for camera access the first time it scans. A device can
+also join with your recovery code. Each device keeps its own mail checking, how
+much mail history it downloads and what it downloads ahead of time, which
+folders of an IMAP account it syncs, its proxy and server timeout, and settings
+that belong to the device itself, such as reduced motion and text size.
+
+Accounts arrive with their passwords, so they work on a new device at once.
+Google and Microsoft sign-ins go only to devices of the same kind. A
+computer's sign-in reaches your other computers, and an Outlook sign-in made
+on a phone reaches your other phones, so a new phone signs in to Gmail and
+Outlook once. Every Android phone signs in to Gmail itself. App keys entered in
+Sign-in settings go to your devices of the same kind too, so you type them once
+for each kind of device. **Passwords and sign-ins** in Settings → Sync turns
+all of this on or off for every device.
 
 Flectar Mail Sync is a paid service, with a free trial, that pays for the
 servers it runs on. Each contribution to Flectar Mail earns a free year of it,

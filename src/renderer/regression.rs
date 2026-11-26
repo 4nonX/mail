@@ -469,7 +469,7 @@ fn scrolling_reuses_pixels_and_layout_with_a_bounded_cache() {
         assert_eq!(r.layout_count, layouts);
     }
     r.clear();
-    assert!(r.tiles.is_empty() && r.cpu_painter.is_none());
+    assert!(r.tiles.is_empty() && r.backend.borrow().cpu_painter.is_none());
 }
 
 #[test]
@@ -498,7 +498,7 @@ fn memory_pressure_keeps_only_the_visible_tiles_until_it_passes() {
 
     assert!(r.release_caches(Instant::now() + Duration::from_secs(600)));
     assert_eq!(tiles(&r), [3, 4, 5]);
-    assert!(r.cpu_painter.is_none());
+    assert!(r.backend.borrow().cpu_painter.is_none());
     assert_eq!(r.retained_tiles().len(), 3);
     // Scrolling paints what it reveals, still without overscan.
     r.set_visible_region(2100.0, 900.0);
@@ -510,6 +510,36 @@ fn memory_pressure_keeps_only_the_visible_tiles_until_it_passes() {
     assert!(r.set_visible_region(2100.0, 900.0));
     r.render_cpu_if_needed(520, 900, 1.0).unwrap();
     assert_eq!(tiles(&r), [3, 4, 5, 6]);
+}
+
+#[test]
+fn releasing_paint_buffers_keeps_the_painter_and_its_pixels() {
+    let mut r = renderer(&format!(
+        "<body style='margin:0'>{}</body>",
+        "<p style='margin:0;font-size:20px'>Cafe\u{301} hello <a href='https://example.com'>linked world</a></p>".repeat(40)
+    ));
+    let pixels = |r: &GpuEmailRenderer| {
+        r.tiles
+            .iter()
+            .map(|(index, tile)| {
+                let rgb = tile.image.to_rgb8().expect("tiles are RGB");
+                (*index, rgb.as_bytes().to_vec())
+            })
+            .collect::<Vec<_>>()
+    };
+    r.render_cpu_if_needed(520, 900, 1.0).unwrap();
+    let painted = pixels(&r);
+    assert!(!painted.is_empty());
+
+    r.release_paint_buffers();
+    assert!(
+        r.backend.borrow().cpu_painter.is_some(),
+        "images and glyphs stay cached"
+    );
+    r.tiles.clear();
+    r.region_dirty = true;
+    r.render_cpu_if_needed(520, 900, 1.0).unwrap();
+    assert_eq!(pixels(&r), painted);
 }
 
 #[test]
@@ -756,6 +786,10 @@ fn culled_text_tiles_match_a_full_surface() {
             "transform:rotate(3deg);transform-origin:top left",
         ),
         ("filtered", "filter:opacity(0.8)"),
+        (
+            "shadowed",
+            "text-shadow:2px 3px 4px rgba(0,0,0,.6),0 0 6px #08f;filter:blur(0.5px)",
+        ),
     ] {
         let text = if name == "cached-lines" {
             "Accents ÅÉgj <b>bold</b> <i>italic</i> café <span style='background:#cfc'>highlight</span> "
@@ -775,7 +809,7 @@ fn culled_text_tiles_match_a_full_surface() {
             let full = render_to_buffer::<VelloCpuImageRenderer, _>(
                 |scene| {
                     paint_scene(
-                        scene,
+                        &mut cpu_scene::CpuScene(scene),
                         &mut email.document,
                         scale as f64,
                         tiled.width,
@@ -959,6 +993,78 @@ fn find_handles_unicode_cycles_and_decoded_fragments() {
     assert!(r.fragment_y("#caf%C3%A9").is_some());
     r.find("", 0);
     assert!(!r.has_selection());
+}
+
+#[test]
+fn blocked_images_keep_room_for_their_alt_text() {
+    // Remote images are blocked by default. One without a size lays out with
+    // its alt text, as browsers lay out an image they can't show, so the
+    // reader's placeholder has room to show that text. An empty alt still
+    // takes no room.
+    let mut r = GpuEmailRenderer::default();
+    let provider =
+        crate::remote::email_image_provider_tracked(Arc::new(|_| {}), false, r.resources.clone())
+            .unwrap();
+    r.set_email(
+        prepare_email_html_with_provider(
+            "<body style='margin:0'><img src='https://example.com/header.png' alt='Weekly header' style='display:block'>\
+             <img src='https://example.com/spacer.gif' alt='' style='display:block'><p>After</p></body>",
+            Some(provider),
+        )
+        .unwrap(),
+    );
+    r.render_cpu_if_needed(400, 300, 1.0).unwrap();
+    let placeholders = r.image_placeholders();
+    assert_eq!(placeholders.len(), 1);
+    assert_eq!(placeholders[0].alt, "Weekly header");
+    assert!(placeholders[0].width > 40.0 && placeholders[0].height >= 10.0);
+}
+
+#[test]
+fn xhtml_mail_parses_as_html() {
+    // Browsers parse mail as HTML whatever its doctype, so a `<br>` or an
+    // `<img>` without a closing slash doesn't swallow the text after it, as
+    // it did when the XHTML doctype made Blitz parse the message as XML.
+    for doctype in [
+        r#"<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">"#,
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        "\u{feff}",
+    ] {
+        let mut r = renderer(&format!(
+            r#"{doctype}<html xmlns="http://www.w3.org/1999/xhtml"><body><p>One<br>Two<img src="cid:x" alt=""><p>Three</p></body></html>"#
+        ));
+        assert_eq!(r.find("Two", 0).1, 1, "{doctype}");
+        assert_eq!(r.find("Three", 0).1, 1, "{doctype}");
+    }
+}
+
+#[test]
+fn find_highlights_every_match_until_find_ends() {
+    let mut r = renderer("<body><p>one two one</p><p>one</p></body>");
+    assert!(r.render_cpu_if_needed(520, 400, 1.0).unwrap().is_some());
+    let highlights = |r: &GpuEmailRenderer| {
+        r.email
+            .as_ref()
+            .unwrap()
+            .document
+            .text_highlights()
+            .iter()
+            .map(|highlight| highlight.active)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(r.find("one", 0).1, 3);
+    assert_eq!(highlights(&r), [true, false, false]);
+    assert!(r.render_cpu_if_needed(520, 400, 1.0).unwrap().is_some());
+    r.find("one", 1);
+    assert_eq!(highlights(&r), [false, true, false]);
+    assert!(r.render_cpu_if_needed(520, 400, 1.0).unwrap().is_some());
+    // When find ends, the matches lose their highlights and the current one
+    // stays selected, as in browsers.
+    r.end_find();
+    assert!(highlights(&r).is_empty());
+    assert_eq!(r.selected_text().as_deref(), Some("one"));
+    assert!(r.render_cpu_if_needed(520, 400, 1.0).unwrap().is_some());
+    assert!(r.render_cpu_if_needed(520, 400, 1.0).unwrap().is_none());
 }
 
 #[test]
@@ -1701,4 +1807,163 @@ fn slant_axis_italics_lean_forward() {
             "the italic l doesn't lean forward at {scale}x, its left edge is at {top} near the top and {bottom} near the bottom"
         );
     }
+}
+
+/// A solid square picture as a data URL, which loads without a network.
+fn solid_png(color: [u8; 3]) -> String {
+    use base64::Engine;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(16, 16, image::Rgb(color))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png.into_inner())
+    )
+}
+
+fn picture_loaded(r: &GpuEmailRenderer) -> bool {
+    let email = r.email.as_ref().unwrap();
+    let id = email.document.query_selector("img").unwrap().unwrap();
+    email
+        .document
+        .get_node(id)
+        .and_then(|node| node.element_data())
+        .and_then(|element| element.raster_image_data())
+        .is_some()
+}
+
+/// A renderer on `backend` whose message is a picture in `color` taller than
+/// the first tile, once the picture has loaded.
+fn picture_renderer(
+    backend: &Rc<RefCell<PaintBackend>>,
+    runtime: &tokio::runtime::Runtime,
+    color: [u8; 3],
+) -> GpuEmailRenderer {
+    let mut r = GpuEmailRenderer::with_backend(Rc::clone(backend));
+    r.configure_resources(runtime.handle().clone(), false)
+        .unwrap();
+    let html = format!(
+        "<body style='margin:0'><img style='display:block;width:520px;height:600px' src='{}'></body>",
+        solid_png(color)
+    );
+    let email = r.prepare_email_html(&html, false).unwrap();
+    r.set_email(email);
+    for _ in 0..200 {
+        if picture_loaded(&r) {
+            break;
+        }
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(5)).await });
+        r.poll_resources();
+    }
+    assert!(picture_loaded(&r), "the picture should load");
+    r
+}
+
+fn middle_of_first_tile(r: &GpuEmailRenderer) -> [u8; 3] {
+    let pixels = r.tiles[&0].image.to_rgb8().expect("tiles are RGB");
+    let (width, height) = (pixels.width() as usize, pixels.height() as usize);
+    let pixel = pixels.as_slice()[height / 2 * width + width / 2];
+    [pixel.r, pixel.g, pixel.b]
+}
+
+fn long_message() -> String {
+    format!(
+        "<body style='margin:0'>{}</body>",
+        "<p style='height:110px;margin:0'>Scrollable words</p>".repeat(100)
+    )
+}
+
+fn sharing(backend: &Rc<RefCell<PaintBackend>>, html: &str) -> GpuEmailRenderer {
+    let mut r = GpuEmailRenderer::with_backend(Rc::clone(backend));
+    r.set_email(prepare_email_html(html).unwrap());
+    r
+}
+
+#[test]
+fn renderers_sharing_a_backend_keep_their_own_pictures() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let backend = Rc::default();
+    let (red, blue) = ([200, 30, 40], [20, 60, 210]);
+    let mut first = picture_renderer(&backend, &runtime, red);
+    let mut second = picture_renderer(&backend, &runtime, blue);
+    first.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+    second.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+    assert!(backend.borrow().cpu_painter.is_some());
+
+    // The painter's image cache now holds both pictures.
+    first.tiles.clear();
+    first.region_dirty = true;
+    first.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+    for (r, color) in [(&first, red), (&second, blue)] {
+        let painted = middle_of_first_tile(r);
+        assert!(
+            painted.iter().zip(color).all(|(a, b)| a.abs_diff(b) <= 2),
+            "painted {painted:?} instead of {color:?}"
+        );
+    }
+}
+
+#[cfg(feature = "gpu-renderer")]
+#[test]
+fn giving_up_the_gpu_through_one_renderer_repaints_the_others() {
+    let backend = Rc::default();
+    let mut first = sharing(&backend, BODY);
+    let mut second = sharing(&backend, BODY);
+    first.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+    second.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+    assert!(!second.needs_repaint());
+    let (layouts, tiles) = (second.layout_count, second.tile_count);
+
+    // Its tiles may be textures on the device that was given up.
+    first.teardown_gpu();
+    assert!(second.needs_repaint());
+    second
+        .render_cpu_if_needed(520, 900, 1.0)
+        .unwrap()
+        .expect("the message is painted again");
+    assert_eq!(second.layout_count, layouts + 1);
+    assert_eq!(second.tile_count, tiles + second.tiles.len() as u64);
+    assert!(!second.needs_repaint());
+}
+
+#[test]
+fn suspending_through_one_renderer_stops_every_renderer() {
+    let backend = Rc::default();
+    let mut first = sharing(&backend, &long_message());
+    let mut second = sharing(&backend, &long_message());
+    first.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+    second.render_cpu_if_needed(520, 900, 1.0).unwrap().unwrap();
+
+    first.set_suspended(true);
+    assert!(second.set_visible_region(4000.0, 900.0));
+    assert!(!second.needs_repaint());
+    assert!(
+        second
+            .render_cpu_if_needed(520, 900, 1.0)
+            .unwrap()
+            .is_none()
+    );
+
+    first.set_suspended(false);
+    assert!(second.needs_repaint());
+    second
+        .render_cpu_if_needed(520, 900, 1.0)
+        .unwrap()
+        .expect("painting goes on once resumed");
+}
+
+#[test]
+fn memory_pressure_through_one_renderer_stops_overscan_for_every_renderer() {
+    let backend = Rc::default();
+    let mut first = sharing(&backend, &long_message());
+    let mut second = sharing(&backend, &long_message());
+    assert!(!first.release_caches(Instant::now() + Duration::from_secs(600)));
+    second.set_visible_region(2000.0, 900.0);
+    second.render_cpu_if_needed(520, 900, 1.0).unwrap();
+    // Tiles 3 to 5 show 2000-2900, with no overscan around them.
+    assert_eq!(second.tiles.keys().copied().collect::<Vec<_>>(), [3, 4, 5]);
 }

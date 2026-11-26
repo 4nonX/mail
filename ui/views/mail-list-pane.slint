@@ -15,6 +15,7 @@ import { WorkspaceSearchToolbar } from "../components/workspace-layout.slint";
 import { WorkspaceListLoadingRow, WorkspaceListTransition } from "../components/workspace-list.slint";
 import { TabsUi } from "../components/workspace-navigation.slint";
 import { Shortcuts } from "../shortcuts.slint";
+import { ReaderWindows } from "../reader-ui.slint";
 import { MessageSource } from "../message-source.slint";
 import { LocalMailUi } from "../local-mail.slint";
 import { SavedSearchUi } from "../saved-searches.slint";
@@ -26,6 +27,7 @@ import { ImportActivity } from "../dialogs/import-dialog.slint";
 import { AutoReplyActivity } from "../auto-replies.slint";
 import { MovePickerUi } from "../dialogs/move-dialog.slint";
 import { SnoozeUi } from "../dialogs/when-dialog.slint";
+import { AppIcon } from "../app-icon.slint";
 
 // A chip on a message-list row that acts on what it shows instead of
 // opening the message. Other buttons act on the row, as anywhere else on it.
@@ -449,6 +451,10 @@ component EarlierMailRow inherits Rectangle {
 export component MailListPane inherits FocusScope {
     enabled: false;
     in property <bool> compact: false;
+    // Phones check mail by pulling the list down, so the toolbar needs no
+    // refresh button there.
+    private property <bool> pull-refreshes: root.compact
+        && (AppIcon.platform == "android" || AppIcon.platform == "ios" || AppIcon.platform == "ohos");
     // Single-surface navigation is also used by the desktop Minimal layout;
     // keep it separate from compact sizing so desktop controls stay dense.
     in property <bool> single-pane-navigation: root.compact;
@@ -873,6 +879,7 @@ export component MailListPane inherits FocusScope {
                             filter-accessible-id: "mail-filter-button";
                             show-save-search: true;
                             show-search-tips: true;
+                            show-refresh: !root.pull-refreshes;
                             refresh-enabled: !root.sync_in_progress;
                             refresh-tooltip: root.sync_in_progress ? @tr("Synchronizing mail") : @tr("Check for new mail");
                             refresh-accessible-id: "mail-refresh-button";
@@ -1090,6 +1097,14 @@ export component MailListPane inherits FocusScope {
                                 activated => {
                                     root.move-cursor("current", 1, false);
                                     if root.keyboard-email-id >= 0 { root.open_email(root.keyboard-email-id); }
+                                }
+                            }
+                            KeyBinding {
+                                keys: Shortcuts.open-message-in-window;
+                                enabled: list-keyboard.has-focus && ReaderWindows.available;
+                                activated => {
+                                    root.move-cursor("current", 1, false);
+                                    if root.keyboard-email-id >= 0 { ReaderWindows.open(root.keyboard-email-id); }
                                 }
                             }
                             KeyBinding {
@@ -1322,6 +1337,13 @@ export component MailListPane inherits FocusScope {
                                                 }
                                                 if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                                                     row-context.show({ x: row-hit.mouse-x, y: row-hit.mouse-y });
+                                                }
+                                            }
+                                            // A double-click opens the conversation in a window
+                                            // of its own, as mail apps on the desktop do.
+                                            double-clicked => {
+                                                if !root.compact && ReaderWindows.available {
+                                                    ReaderWindows.open(mail-data.id);
                                                 }
                                             }
 
@@ -1727,7 +1749,8 @@ export component MailListPane inherits FocusScope {
 
                                         Menu {
                                             if TabsUi.enabled : MenuItem { title: @tr("Open in new tab"); activated => { TabsUi.open-conversation(mail-data.id, true); } }
-                                            if TabsUi.enabled : MenuSeparator {}
+                                            if ReaderWindows.available : MenuItem { title: @tr("Open in new window"); activated => { ReaderWindows.open(mail-data.id); } }
+                                            if TabsUi.enabled || ReaderWindows.available : MenuSeparator {}
                                             MenuItem { title: mail-data.starred ? @tr("Remove star") : @tr("Star message"); activated => { root.message_action_for_email(mail-data.id, mail-data.starred ? "unstar" : "star"); } }
                                             MenuItem { title: mail-data.unread ? @tr("Mark as read") : @tr("Mark as unread"); activated => { root.message_action_for_email(mail-data.id, mail-data.unread ? "mark_read" : "mark_unread"); } }
                                             // Local mail has no archive or spam.
